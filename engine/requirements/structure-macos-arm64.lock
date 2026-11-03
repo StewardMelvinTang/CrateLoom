@@ -1,0 +1,148 @@
+# Locked for Python 3.11 on Apple Silicon macOS; source: structure.in.
+all-in-one-infer @ git+https://github.com/openmirlab/all-in-one-infer.git@566f96c3f007c783ab5eb6db0123bf3335af8f31
+    # via -r engine/requirements/structure.in
+antlr4-python3-runtime==4.9.3
+    # via
+    #   hydra-core
+    #   omegaconf
+audioread==3.1.0
+    # via librosa
+certifi==2026.10.23
+    # via requests
+cffi==2.1.1
+    # via soundfile
+charset-normalizer==3.5.2
+    # via requests
+cloudpickle==3.1.2
+    # via joblib
+contourpy==1.3.3
+    # via matplotlib
+cycler==0.12.1
+    # via matplotlib
+decorator==5.3.1
+    # via librosa
+demucs-infer @ git+https://github.com/openmirlab/demucs-infer.git@ffe0080ef96336a34e3f0ee8ba22ceaa0623a36c
+    # via all-in-one-infer
+einops==0.8.2
+    # via demucs-infer
+filelock==4.2.7
+    # via torch
+fonttools==4.68.0
+    # via matplotlib
+fsspec==2026.9.0
+    # via torch
+hydra-core==1.3.8
+    # via all-in-one-infer
+idna==3.20
+    # via requests
+jinja2==3.1.6
+    # via torch
+joblib==1.6.0
+    # via
+    #   librosa
+    #   scikit-learn
+julius==0.2.8
+    # via demucs-infer
+kiwisolver==1.5.1
+    # via matplotlib
+lazy-loader==0.6
+    # via librosa
+librosa==0.11.0
+    # via all-in-one-infer
+llvmlite==0.50.0
+    # via numba
+madmom-infer @ git+https://github.com/openmirlab/madmom-infer.git@a9ed04ec942dd6ec5309df7ce7f3783d1bb42575
+    # via all-in-one-infer
+markupsafe==3.0.4
+    # via jinja2
+matplotlib==3.11.2
+    # via all-in-one-infer
+mpmath==1.3.0
+    # via sympy
+msgpack==1.2.4
+    # via librosa
+narwhals==2.28.0
+    # via scikit-learn
+networkx==3.6.1
+    # via torch
+numba==0.68.1
+    # via librosa
+numpy==2.4.6
+    # via
+    #   all-in-one-infer
+    #   contourpy
+    #   demucs-infer
+    #   librosa
+    #   madmom-infer
+    #   matplotlib
+    #   numba
+    #   scikit-learn
+    #   scipy
+    #   soundfile
+    #   soxr
+omegaconf==2.3.1
+    # via
+    #   all-in-one-infer
+    #   hydra-core
+packaging==26.3
+    # via
+    #   hydra-core
+    #   lazy-loader
+    #   matplotlib
+    #   pooch
+pillow==13.0.0
+    # via matplotlib
+platformdirs==4.14.3
+    # via pooch
+pooch==1.9.0
+    # via librosa
+pycparser==3.12
+    # via cffi
+pyparsing==3.3.3
+    # via matplotlib
+python-dateutil==4.0.0
+    # via matplotlib
+pyyaml==6.0.3
+    # via
+    #   demucs-infer
+    #   omegaconf
+requests==2.34.2
+    # via pooch
+scikit-learn==1.9.1
+    # via librosa
+scipy==1.17.1
+    # via
+    #   all-in-one-infer
+    #   librosa
+    #   madmom-infer
+    #   scikit-learn
+setuptools==81.0.0
+    # via torch
+soundfile==0.14.0
+    # via
+    #   all-in-one-infer
+    #   demucs-infer
+    #   librosa
+soxr==1.1.0
+    # via librosa
+sympy==1.14.0
+    # via torch
+threadpoolctl==3.7.0
+    # via scikit-learn
+torch==2.15.0
+    # via
+    #   -r engine/requirements/structure.in
+    #   all-in-one-infer
+    #   demucs-infer
+    #   julius
+tqdm==4.70.1
+    # via demucs-infer
+typing-extensions==4.16.0
+    # via
+    #   librosa
+    #   soundfile
+    #   torch
+tzdata==2026.6
+    # via python-dateutil
+urllib3==2.8.0
+    # via requests

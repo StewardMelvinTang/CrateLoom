@@ -1,0 +1,2 @@
+all-in-one-infer @ git+https://github.com/openmirlab/all-in-one-infer.git@566f96c3f007c783ab5eb6db0123bf3335af8f31
+torch==2.15.0

@@ -117,3 +117,27 @@ class Flow(unittest.TestCase):
             self.assertEqual(response['result']['analysis'], before['analysis'])
             self.assertNotEqual(response['result']['file_hash'], original['file_hash'])
             self.assertEqual(response['result']['audio_hash'], original['audio_hash'])
+
+    def test_schema_two_library_migrates_without_losing_manual_cues(self):
+        import hashlib
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); audio = root/'legacy.wav'; data = root/'data'; data.mkdir()
+            subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=440:duration=2','-y',str(audio)],check=True)
+            db=sqlite3.connect(data/'library.sqlite3')
+            db.executescript('''CREATE TABLE tracks (id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,title TEXT NOT NULL,artist TEXT NOT NULL,duration REAL NOT NULL,codec TEXT NOT NULL,sample_rate INTEGER,file_hash TEXT NOT NULL,analysis TEXT,audio_hash TEXT); CREATE TABLE cues (track_id TEXT NOT NULL,slot INTEGER NOT NULL,position_us INTEGER NOT NULL,label TEXT NOT NULL,PRIMARY KEY(track_id,slot)); PRAGMA user_version=2;''')
+            db.execute('INSERT INTO tracks VALUES (?,?,?,?,?,?,?,?,?,?)',('old',str(audio),'Legacy','',2,'pcm_s16le',44100,hashlib.sha256(audio.read_bytes()).hexdigest(),None,None))
+            db.execute('INSERT INTO cues VALUES (?,?,?,?)',('old',0,250000,'Existing')); db.commit(); db.close()
+            env={**os.environ,'CRATELOOM_DATA':str(data),'PYTHONPATH':str(Path(__file__).resolve().parents[1])}
+            req={'protocol_version':1,'request_id':'test','method':'track.get','params':{'id':'old'}}
+            proc=subprocess.run([sys.executable,'-m','crateloom'],input=json.dumps(req)+'\n',capture_output=True,text=True,env=env,check=True)
+            response=json.loads(proc.stdout); self.assertNotIn('error',response)
+            self.assertEqual(response['result']['cues'],[{'slot':0,'position_us':250000,'label':'Existing'}])
+            self.assertEqual(response['result']['sections'],[])
+            self.assertIsNotNone(response['result']['audio_hash'])
+            with sqlite3.connect(data/'library.sqlite3') as verify:
+                self.assertEqual(verify.execute('PRAGMA user_version').fetchone()[0],8)
+            backups=list(data.glob('library-before-v8-*.sqlite3')); self.assertEqual(len(backups),1)
+            with sqlite3.connect(backups[0]) as backup:
+                self.assertEqual(backup.execute('PRAGMA user_version').fetchone()[0],2)
+                self.assertEqual(backup.execute('SELECT label FROM cues').fetchone()[0],'Existing')
