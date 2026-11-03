@@ -18,8 +18,52 @@ def connect():
     db = sqlite3.connect(DB)
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA foreign_keys=ON')
-    db.executescript('''CREATE TABLE IF NOT EXISTS tracks (id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,title TEXT NOT NULL,artist TEXT NOT NULL,duration REAL NOT NULL,codec TEXT NOT NULL, sample_rate INTEGER, file_hash TEXT NOT NULL, analysis TEXT); CREATE TABLE IF NOT EXISTS cues (track_id TEXT NOT NULL REFERENCES tracks(id),slot INTEGER NOT NULL,position_us INTEGER NOT NULL,label TEXT NOT NULL,PRIMARY KEY(track_id,slot)); PRAGMA user_version=1;''')
+    version = db.execute('PRAGMA user_version').fetchone()[0]
+    if version > 2:
+        db.close()
+        raise ValueError('Library was created by a newer CrateLoom version')
+    db.executescript('''CREATE TABLE IF NOT EXISTS tracks (id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,title TEXT NOT NULL,artist TEXT NOT NULL,duration REAL NOT NULL,codec TEXT NOT NULL, sample_rate INTEGER, file_hash TEXT NOT NULL, analysis TEXT); CREATE TABLE IF NOT EXISTS cues (track_id TEXT NOT NULL REFERENCES tracks(id),slot INTEGER NOT NULL,position_us INTEGER NOT NULL,label TEXT NOT NULL,PRIMARY KEY(track_id,slot));''')
+    columns={row['name'] for row in db.execute('PRAGMA table_info(tracks)')}
+    if 'audio_hash' not in columns:
+        db.execute('ALTER TABLE tracks ADD COLUMN audio_hash TEXT')
+    if version < 2:
+        db.execute('PRAGMA user_version=2')
     return db
+
+def file_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as source:
+        for block in iter(lambda: source.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+def audio_hash(path):
+    proc=subprocess.run(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-c','copy','-f','hash','-hash','sha256','-'],capture_output=True,text=True,check=True,timeout=600)
+    line=proc.stdout.strip()
+    if not line.startswith('SHA256=') or len(line) != 71:
+        raise ValueError('Unable to verify the audio stream')
+    return line[7:]
+
+def verify_asset(db, t):
+    path = Path(t['path'])
+    if not path.is_file():
+        raise ValueError('Audio file is missing; restore it before continuing')
+    current = file_hash(path)
+    if current != t['file_hash']:
+        # A legacy track has no prior audio-stream signature, so changed bytes
+        # cannot safely be classified as tags-only.
+        if not t['audio_hash']:
+            raise ValueError('The file changed since import. Restore the original before editing or exporting cues.')
+        duration, stream, _ = probe(path)
+        if (audio_hash(path) != t['audio_hash'] or stream.get('codec_name') != t['codec']
+                or int(stream.get('sample_rate') or 0) != int(t['sample_rate'] or 0)
+                or abs(duration - t['duration']) > .001):
+            raise ValueError('The audio changed since import. Restore the original before editing or exporting cues.')
+        db.execute('UPDATE tracks SET file_hash=? WHERE id=?', (current, t['id']))
+    elif not t['audio_hash']:
+        # Record a baseline for unchanged tracks created by schema version 1.
+        db.execute('UPDATE tracks SET audio_hash=? WHERE id=?', (audio_hash(path), t['id']))
+    return path
 
 def track(db, tid):
     row = db.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
@@ -55,17 +99,20 @@ def dispatch(method, p):
             path=Path(p['path']).expanduser().resolve(strict=True)
             if not path.is_file(): raise ValueError('Choose an audio file')
             old=db.execute('SELECT id FROM tracks WHERE path=?',(str(path),)).fetchone()
-            if old: return track(db,old['id'])
+            if old:
+                existing=track(db,old['id']); verify_asset(db,existing); return track(db,old['id'])
             duration,stream,tags=probe(path)
-            h=hashlib.sha256()
-            with path.open('rb') as f:
-                for block in iter(lambda:f.read(1024*1024),b''): h.update(block)
-            tid=str(uuid.uuid4()); db.execute('INSERT INTO tracks VALUES (?,?,?,?,?,?,?,?,NULL)',(tid,str(path),tags.get('title') or path.stem,tags.get('artist',''),duration,stream.get('codec_name','unknown'),stream.get('sample_rate'),h.hexdigest()))
+            digest=file_hash(path)
+            signature=audio_hash(path)
+            tid=str(uuid.uuid4()); db.execute('INSERT INTO tracks (id,path,title,artist,duration,codec,sample_rate,file_hash,analysis,audio_hash) VALUES (?,?,?,?,?,?,?,?,NULL,?)',(tid,str(path),tags.get('title') or path.stem,tags.get('artist',''),duration,stream.get('codec_name','unknown'),stream.get('sample_rate'),digest,signature))
             return track(db,tid)
-        if method == 'track.get': return track(db,p['id'])
+        if method == 'track.get':
+            result=track(db,p['id'])
+            if not result['missing']: verify_asset(db,result)
+            result=track(db,p['id'])
+            return result
         if method == 'analysis.run':
-            t=track(db,p['id']); path=Path(t['path'])
-            if not path.is_file(): raise ValueError('Audio file is missing; restore it before analysis')
+            t=track(db,p['id']); path=verify_asset(db,t)
             # Decoded mono envelope; no semantic or tempo claims are inferred from peaks.
             proc=subprocess.run(['ffmpeg','-v','error','-i',str(path),'-vn','-ac','1','-ar','1000','-f','s16le','-'],capture_output=True,check=True,timeout=600)
             import array
@@ -77,7 +124,7 @@ def dispatch(method, p):
             db.execute('UPDATE tracks SET analysis=? WHERE id=?',(json.dumps(result),t['id']))
             return track(db,t['id'])
         if method == 'cues.save':
-            t=track(db,p['id']); cues=p['cues']; seen=set()
+            t=track(db,p['id']); verify_asset(db,t); cues=p['cues']; seen=set()
             if not isinstance(cues,list) or len(cues)>8: raise ValueError('Expected at most eight cues')
             for c in cues:
                 slot=c['slot']; pos=c['position_us']; label=c['label']
@@ -90,11 +137,12 @@ def dispatch(method, p):
             return track(db,t['id'])
         if method == 'export.rekordbox':
             t=track(db,p['id'])
-            if t['missing']: raise ValueError('Audio file is missing; restore it before export')
-            dest=Path(p['path']).expanduser().resolve(); source=Path(t['path']).resolve()
+            source=verify_asset(db,t).resolve()
+            dest=Path(p['path']).expanduser().resolve()
             backup=dest.with_suffix('.crateloom.json')
             if backup.exists(): raise ValueError('Cue backup already exists; choose a new export name to avoid overwriting it')
-            if dest.suffix.lower() != '.xml' or dest == source or backup == source: raise ValueError('Choose an XML destination separate from your audio')
+            protected={Path(r['path']).resolve() for r in db.execute('SELECT path FROM tracks')}
+            if dest.suffix.lower() != '.xml' or dest in protected or backup in protected: raise ValueError('Choose an XML destination separate from all library audio')
             root=ET.Element('DJ_PLAYLISTS',Version='1.0.0'); ET.SubElement(root,'PRODUCT',Name='CrateLoom',Version=VERSION,Company='CrateLoom')
             collection=ET.SubElement(root,'COLLECTION',Entries='1')
             loc=source.as_uri().replace('file:///','file://localhost/',1)

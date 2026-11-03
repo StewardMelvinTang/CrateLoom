@@ -2,7 +2,7 @@
 
 ## Current state
 
-M0 feasibility checks have been exercised with the boundaries in [M0_VERIFICATION.md](M0_VERIFICATION.md); M1 is **in progress**, not complete. The local Python engine imports a single file using ffprobe, stores track records and manual cues in SQLite, derives a real mono waveform envelope using FFmpeg, and exports a one-track rekordbox XML playlist and a separate JSON cue backup. The UI connects the import dialog, track selection, media element, waveform, cue creation/seconds editing/removal, undo/redo and export. No source tags or audio are written.
+M0 feasibility checks have been exercised with the boundaries in [M0_VERIFICATION.md](M0_VERIFICATION.md); The M1 local workflow is implemented as a development build and awaits the owner’s hands-on playback and rekordbox checks. The local Python engine imports a single file using ffprobe, stores track records and manual cues in SQLite, derives a real mono waveform envelope using FFmpeg, and exports a one-track rekordbox XML playlist and a separate JSON cue backup. The UI connects local import, automatic waveform extraction, playback and seeking, waveform zoom, manual A–H cue creation, rename, precise time editing, marker dragging, undo/redo, persistence and export. No source tags or audio are written.
 
 Automated integration uses generated 2-second WAV audio: protocol handshake, import and same-path duplicate, waveform decode, cue persistence across process restarts, XML escaped Unicode/file URL and 1-microsecond serialization, and JSON backup. This checks mechanics, not musical analysis or audible alignment.
 
@@ -10,8 +10,8 @@ The native development app has been exercised with a generated WAV through impor
 
 ## Important limitations
 
-- Tempo, beat/downbeat and structural analysis, automatic suggestions, WaveSurfer detail/dragging, cue labels/colors, pre-roll, loop preview, folder/batch import, relinking, metadata editing, online discovery/acquisition, durable jobs/cancellation, and portable audio copying are not implemented.
-- The analysis request is synchronous and blocks other engine requests; it is not yet cancellable. Decoded samples and peak arrays are held in memory and peaks travel over IPC, so this is an initial prototype, not the specified bounded cache architecture. No audio identity/cache invalidation exists; do not replace files in place after analysis.
+- Tempo, beat/downbeat and structural analysis, automatic suggestions, cue colors and slot reassignment, pre-roll, loop preview, folder/batch import, relinking, metadata editing, online discovery/acquisition, durable jobs/cancellation, and portable audio copying are not implemented. The waveform is a 1,000-peak overview with zoom, not a high-resolution detail waveform.
+- The analysis request is synchronous and blocks other engine requests; it is not yet cancellable. Decoded samples and peak arrays are held in memory and peaks travel over IPC, so this is an initial prototype, not the specified bounded cache architecture. A whole-file hash and audio-stream signature now protect changed assets. Existing schema-v1 tracks must first be opened unchanged to establish their stream signature; replacement or ambiguous changes are blocked. Detection is tested on generated WAV replacement and a single MP3 tag-only rewrite, not every container or transformation.
 - Development shell normally starts Python from the source tree; a frozen sidecar can be selected for testing, but no bundled sidecar, FFmpeg, signing, notarization, clean-machine test or Windows test exists. Python/FFmpeg startup failure is not yet gracefully recovered. No release artifact has been produced.
 - Tauri asset access is restricted at runtime to selected imported track paths, but local webview playback position and a click-to-seek were exercised; range behavior, audible playback and decoder alignment require further measurement. JSONL has no timeout, crash recovery, queue, or robust maximum-response guard. Do not treat this as hardened IPC.
 - The canonical stored cue unit is integer microseconds on the decoded media timeline. MP3 delay/padding, VBR, browser/FFmpeg/rekordbox decoder differences, and real playback alignment remain unmeasured. No offset is guessed.
@@ -20,4 +20,8 @@ The native development app has been exercised with a generated WAV through impor
 
 ## Next work
 
-Prove native playback/seek and cue editing on real files; implement bounded, cancellable background analysis and a pinned beat-analysis provider; move peaks out of JSON IPC and key caches to audio identity; then implement robust cue proposals, library/metadata workflows, safe acquisition, packaging and cross-platform verification. Never report XML generation as a successful rekordbox import.
+Complete the owner’s real-file playback, cue and rekordbox import checks; implement bounded, cancellable background analysis and a pinned beat-analysis provider; move peaks out of JSON IPC and key caches to audio identity; then implement robust cue proposals, library/metadata workflows, safe acquisition, packaging and cross-platform verification. Never report XML generation as a successful rekordbox import.
+
+## M1 native verification (2026-11-03)
+
+On a generated 20-second WAV, the development window imported and automatically displayed the waveform. A cue was added, renamed, set to 5.25 seconds, undone and redone, dragged to 9.286432 seconds, exported, and restored after restart. Triggering the restored cue advanced playback from approximately 9.29 seconds. The XML and JSON contained the same cue time and label. This does not prove audible alignment or actual rekordbox import. Automated tests cover eight slots, reanalysis preserving cues, rejected invalid cue edits, replacement detection, and one MP3 tag-only change. The owner has tested the current development build; detailed playback and rekordbox alignment remain to be verified.

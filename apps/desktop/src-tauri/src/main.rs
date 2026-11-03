@@ -49,7 +49,7 @@ impl Engine {
 struct EngineState(Mutex<Engine>);
 
 #[tauri::command]
-fn engine_call(
+async fn engine_call(
     app: tauri::AppHandle,
     state: State<'_, EngineState>,
     method: String,
