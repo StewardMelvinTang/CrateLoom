@@ -29,3 +29,35 @@ class Flow(unittest.TestCase):
             self.assertIn('%E9%9F%B3%20%26%20sample.wav',parsed.find('.//COLLECTION/TRACK').attrib['Location'])
             self.assertEqual(json.loads(xml.with_suffix('.crateloom.json').read_text())['track']['cues'],cues)
             self.assertTrue(audio.exists())
+
+    def test_invalid_cues_do_not_replace_saved_cues(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            audio = root / 'test.wav'
+            subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+                            'sine=frequency=440:duration=2', '-y', str(audio)], check=True)
+            env = {**os.environ, 'CRATELOOM_DATA': str(root / 'data'),
+                   'PYTHONPATH': str(Path(__file__).resolve().parents[1])}
+            p = subprocess.Popen([sys.executable, '-m', 'crateloom'], stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            try:
+                def call(method, params):
+                    p.stdin.write(json.dumps({'protocol_version': 1, 'request_id': 'x',
+                                              'method': method, 'params': params}) + '\n')
+                    p.stdin.flush()
+                    return json.loads(p.stdout.readline())
+                p.stdin.write('invalid json\n'); p.stdin.flush()
+                self.assertIn('error', json.loads(p.stdout.readline()))
+                track = call('library.import', {'path': str(audio)})['result']
+                valid = [{'slot': 0, 'position_us': 250000, 'label': 'Start'}]
+                self.assertEqual(call('cues.save', {'id': track['id'], 'cues': valid})['result']['cues'], valid)
+                for invalid in ([{'slot': 0, 'position_us': -1, 'label': 'bad'}],
+                                [{'slot': 0, 'position_us': 5000000, 'label': 'bad'}],
+                                valid + valid):
+                    self.assertIn('error', call('cues.save', {'id': track['id'], 'cues': invalid}))
+                    self.assertEqual(call('track.get', {'id': track['id']})['result']['cues'], valid)
+            finally:
+                p.stdin.close()
+                p.wait(timeout=10)
+                p.stdout.close()
+                p.stderr.close()
