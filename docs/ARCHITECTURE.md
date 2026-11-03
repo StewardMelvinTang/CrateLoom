@@ -1,0 +1,3 @@
+# Development architecture
+
+React calls a restricted Tauri command. Rust holds one Python process and sends protocol-v1 JSON lines over stdin/stdout. Each message carries a request ID and params; responses carry the same ID and either a result or structured error. Stdout is reserved for the protocol. The Python engine alone writes the SQLite database, currently schema version 1. Tauri's asset scope is expanded only for imported track paths returned by the engine. The webview media element handles playback. FFprobe supplies metadata and FFmpeg decodes waveform data. The current implementation is deliberately incomplete; see PROGRESS.md before extending it.

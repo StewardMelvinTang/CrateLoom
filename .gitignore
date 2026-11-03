@@ -1,0 +1,13 @@
+._*
+.DS_Store
+node_modules/
+target/
+dist/
+.venv/
+__pycache__/
+*.pyc
+*.db
+*.sqlite*
+.impeccable/review/
+
+apps/desktop/src-tauri/gen/
