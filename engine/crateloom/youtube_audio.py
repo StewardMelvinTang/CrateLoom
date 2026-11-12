@@ -39,26 +39,56 @@ def executable():
     return str(managed) if managed.is_file() and os.access(managed,os.X_OK) else shutil.which('yt-dlp')
 
 
-def runtime_args():
-    deno = shutil.which('deno')
-    args = ['--js-runtimes','deno:'+deno] if deno else []
+BROWSERS = {'safari':'Safari','chrome':'Chrome','firefox':'Firefox','edge':'Edge'}
+SESSION_ERRORS = re.compile(
+    r'could not find \w+ cookies database|cookies? (?:database|file|store)[^\n]*(?:not permitted|permission denied|locked)'
+    r'|(?:not permitted|permission denied)[^\n]*cookies|(?:failed|unable|cannot|could not)(?: to)? (?:decrypt|load cookies|read cookies|copy)'
+    r'|cookies are no longer valid|keychain|safe storage|unsupported browser')
+UNDECRYPTED = re.compile(r'(?:failed|unable|cannot|could not)(?: to)? decrypt|find-generic-password|safe storage')
+
+
+def selected_browser():
     from . import set_scan_jobs
     control = set_scan_jobs.current()
     browser = control.youtube_browser if control else None
-    if browser in ('safari','chrome','firefox','edge'):
+    return browser if browser in BROWSERS else None
+
+
+def runtime_args():
+    deno = shutil.which('deno')
+    args = ['--js-runtimes','deno:'+deno] if deno else []
+    browser = selected_browser()
+    if browser:
         args += ['--cookies-from-browser',browser]
     return args
 
 
-def failure_kind(error):
-    """Do not mistake a client's warning or bot challenge for a removed video."""
+def error_text(error):
     parts = []
     while error is not None:
         parts.extend([str(error),str(getattr(error,'stderr','') or '')])
         error = error.__cause__
-    detail = '\n'.join(parts).lower()
-    errors = [line for line in detail.splitlines() if line.lstrip().startswith('error:')]
-    detail = '\n'.join(errors) if errors else detail
+    return '\n'.join(parts)
+
+
+def diagnostic(error):
+    """One sanitized line for the attempt log: no query strings, no home path."""
+    lines = [line.strip() for line in error_text(error).splitlines() if line.strip()]
+    line = next((item for item in reversed(lines) if item.lower().startswith('error:')),lines[0] if lines else '')
+    line = re.sub(r'(https?://[^\s?#\'"]+)[^\s\'"]*',r'\1',line)
+    return line.replace(str(Path.home()),'~')[:300]
+
+
+def failure_kind(error):
+    """Do not mistake a client's warning or bot challenge for a removed video."""
+    everything = error_text(error).lower()
+    errors = [line for line in everything.splitlines() if line.lstrip().startswith('error:')]
+    detail = '\n'.join(errors) if errors else everything
+    # A browser session that cannot be read fails before YouTube is contacted. A
+    # denied keychain request is only a warning: the extractor then continues
+    # signed out, so its final error would otherwise look like an account problem.
+    if SESSION_ERRORS.search(detail) or UNDECRYPTED.search(everything):
+        return 'session'
     if any(word in detail for word in ('confirm your age','age-restricted','age restricted','inappropriate for some users')):
         return 'age'
     if any(word in detail for word in ('not available in your country','geo-restricted','not made this video available in your country')):
@@ -70,6 +100,32 @@ def failure_kind(error):
     if any(word in detail for word in ('http error 403','http 403','expired')):
         return 'expired'
     return 'connection'
+
+
+def access_message(kinds, browser=None):
+    """Say which layer failed and what the owner can do about it."""
+    name = BROWSERS.get(browser)
+    if 'unavailable' in kinds:
+        return 'This video is private, removed, or restricted to channel members. Open it on YouTube to check access.'
+    if 'session' in kinds and name:
+        hint = {
+            'safari':'macOS protects Safari data: allow CrateLoom under System Settings > Privacy & Security > Full Disk Access, reopen CrateLoom, then retry. Chrome or Firefox need no extra permission.',
+            'firefox':'Open Firefox, sign in to YouTube, then retry. The most recently used Firefox profile is read.',
+        }.get(browser,f'Open {name}, sign in to YouTube, then retry and allow the macOS keychain request. The most recently used {name} profile is read.')
+        return f'CrateLoom could not read the YouTube session from {name}. {hint}'
+    if 'age' in kinds:
+        if name:
+            return f'YouTube still requires age verification with the {name} session. Sign in to YouTube in {name} with an age-verified account, check that this video plays there, then retry.'
+        return 'YouTube requires age-verified access to this mix. Choose your signed-in browser under YouTube access, then retry.'
+    if 'region' in kinds:
+        return 'The uploader has blocked this mix in your region. Available published entries are kept.'
+    if 'challenge' in kinds:
+        if name:
+            return f'YouTube did not accept the {name} session. Open this video in {name} while signed in, then retry.'
+        return 'YouTube is requesting a signed-in session. Choose your browser under YouTube access, then retry.'
+    if name:
+        return f'The mix audio could not be downloaded with the {name} session. Your available tracklist is kept; retry the audio scan when the connection recovers.'
+    return 'The public audio connections did not complete. Your available tracklist is kept; retry the audio scan when the connection recovers.'
 
 
 def search_entries(api, query, fields, provider):

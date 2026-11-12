@@ -87,6 +87,9 @@ def segmented(api, watch, folder, check, client=None):
     metadata = []
     started = time.monotonic()
     last_data = [started,0]
+    # Reading a browser session can wait on a macOS keychain or privacy request.
+    browser = youtube_audio.selected_browser()
+    first_byte = 150 if browser else 60
     def line(value):
         if value.startswith('scan-progress:'):
             try:
@@ -114,10 +117,12 @@ def segmented(api, watch, folder, check, client=None):
         if size > download_http.MAX_BYTES+1024*1024:
             raise ValueError('This mix exceeds the audio size limit.')
         elapsed = time.monotonic()-started
-        if (last_data[1] and time.monotonic()-last_data[0]>25) or (elapsed>60 and not last_data[1]):
+        if (last_data[1] and time.monotonic()-last_data[0]>25) or (elapsed>first_byte and not last_data[1]):
+            if browser and not last_data[1]:
+                raise ValueError(f'Could not read cookies from {browser}: no response to the macOS keychain or privacy request.')
             raise ValueError('The alternate audio connection did not make progress.')
     args = [binary,'--ignore-config','--no-plugin-dirs','--no-remote-components','--proxy','',
-            '--no-playlist','--no-warnings','--no-colors','--socket-timeout','10','--retries','2',
+            '--no-playlist',*([] if browser else ['--no-warnings']),'--no-colors','--socket-timeout','10','--retries','2',
             '--fragment-retries','2','--extractor-retries','1','--retry-sleep','1','--abort-on-unavailable-fragments',
             '--format','bestaudio[abr<=96][vcodec=none]/bestaudio[vcodec=none]/best[height<=360]/worst','--max-filesize','512M','--match-filter','!is_live & duration <= 10800',
             '--concurrent-fragments','3','--newline','--progress','--progress-delta','.5',
@@ -159,19 +164,27 @@ def obtain(api, watch, check):
     folder.mkdir(parents=True,exist_ok=True)
     last_error = None
     failures = []
-    def record(kind, attempt):
-        failures.append({'attempt':attempt,'result':kind})
-        api.atomic(folder/'attempts.json',json.dumps({'watch':watch,'attempts':failures}).encode())
+    browser = youtube_audio.selected_browser()
+    # Only the extractor's own transfer carries a browser session. The direct CDN
+    # routes are anonymous, so they are skipped when the owner chose a session.
+    routes = [('native',None),('native','web')] if browser else [('native',None),('direct-webm',None),('direct-m4a',None),('native','web_safari')]
+    def record(kind, attempt, route, error=None):
+        entry = {'attempt':attempt,'route':route,'result':kind}
+        if error is not None:
+            entry['detail'] = youtube_audio.diagnostic(error)
+        failures.append(entry)
+        api.atomic(folder/'attempts.json',json.dumps({'watch':watch,'browser':browser,'attempts':failures}).encode())
     with tempfile.TemporaryDirectory(prefix='transfer-',dir=folder) as temp:
         temporary = Path(temp)
-        for attempt in range(4):
+        for attempt,(route,client) in enumerate(routes):
             check()
             target = temporary/str(attempt)
             target.mkdir()
             try:
-                set_scan_jobs.progress('Connecting to mix audio' if attempt==0 else 'Trying another audio connection',attempt=attempt+1)
-                if attempt in (1,2):
-                    kwargs = {'scan':True} if attempt==1 else {}
+                stage = 'Trying another audio connection' if attempt else f'Reading the YouTube session from {youtube_audio.BROWSERS[browser]}' if browser else 'Connecting to mix audio'
+                set_scan_jobs.progress(stage,attempt=attempt+1)
+                if route!='native':
+                    kwargs = {'scan':True} if route=='direct-webm' else {}
                     review, url, headers = youtube_audio.resolve(api,reference,**kwargs)
                     if review['duration']>MAX_DURATION:
                         raise ValueError('Audio scans support mixes up to 3 hours long.')
@@ -181,8 +194,6 @@ def obtain(api, watch, check):
                     transfer.transfer(None,review,url,headers,source,transfer.check,ranges=True)
                     expected = review['duration']
                 else:
-                    control = set_scan_jobs.current()
-                    client = ('web' if control and control.youtube_browser else 'web_safari') if attempt==3 else None
                     source, expected = segmented(api,watch,target,check,client=client)
                 check()
                 set_scan_jobs.progress('Checking mix audio',completed=0,total=1,unit='steps')
@@ -194,25 +205,16 @@ def obtain(api, watch, check):
                 api.atomic(manifest,json.dumps({'watch':watch,'filename':destination.name,'size':destination.stat().st_size,
                                                'hash':digest,'duration':duration}).encode())
                 prune(api.ROOT/'set-audio',folder)
-                record('completed',attempt+1)
+                record('completed',attempt+1,route)
                 return destination
             except (ValueError,OSError,subprocess.SubprocessError) as error:
                 last_error = error
                 kind = youtube_audio.failure_kind(error)
-                record(kind,attempt+1)
-                if kind=='unavailable' or '3 hours' in str(error):
+                record(kind,attempt+1,route,error)
+                # An unreadable session or a removed video fails the same way on every route.
+                if kind in ('unavailable','session') or '3 hours' in str(error):
                     break
-    kinds = {item['result'] for item in failures}
-    if 'unavailable' in kinds:
-        message = 'This video is private, removed, or restricted to channel members. Open it on YouTube to check access.'
-    elif 'age' in kinds:
-        message = 'YouTube requires age-verified access to this mix. Choose your signed-in browser under Options, then retry.'
-    elif 'region' in kinds:
-        message = 'The uploader has blocked this mix in your region. Available published entries are kept.'
-    elif 'challenge' in kinds:
-        message = 'YouTube is requesting a signed-in session. Choose your browser under Options, then retry.'
-    else:
-        message = 'The public audio connections did not complete. Your available tracklist is kept; retry the audio scan when the connection recovers.'
+    message = youtube_audio.access_message({item['result'] for item in failures},browser)
     if '3 hours' in str(last_error):
         message = 'Audio scans support mixes up to 3 hours long.'
     raise ValueError(message) from last_error

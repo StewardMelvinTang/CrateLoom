@@ -292,6 +292,44 @@ time.sleep(60)
         self.assertEqual(youtube_audio.failure_kind(ValueError('Video unavailable. Try again later.')),'connection')
         self.assertEqual(youtube_audio.failure_kind(ValueError('This video is not available in your country')),'region')
 
+    def test_unreadable_browser_session_is_its_own_failure_kind(self):
+        for detail in ('ERROR: could not find chrome cookies database in "/Users/someone/Library/Application Support/Google/Chrome"',
+                       "ERROR: could not find firefox cookies database in '/Users/someone/Library/Application Support/Firefox'",
+                       "ERROR: [Errno 1] Operation not permitted: '/Users/someone/Library/Containers/com.apple.Safari/Data/Library/Cookies/Cookies.binarycookies'",
+                       'WARNING: cannot decrypt v10 cookies: no key found\nERROR: [youtube] abc: Sign in to confirm your age. Use --cookies-from-browser or --cookies for the authentication.'):
+            error=subprocess.CalledProcessError(1,['extractor'],stderr=detail)
+            self.assertEqual(youtube_audio.failure_kind(error),'session',detail)
+        signed_out=subprocess.CalledProcessError(1,['extractor'],stderr='ERROR: [youtube] abc: Sign in to confirm your age. This video may be inappropriate for some users. Use --cookies-from-browser or --cookies for the authentication. See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp for how to manually pass cookies.')
+        self.assertEqual(youtube_audio.failure_kind(signed_out),'age')
+        line=youtube_audio.diagnostic(subprocess.CalledProcessError(1,['extractor'],stderr=f'WARNING: noise\nERROR: could not open {Path.home()}/Library/x at https://rr1.googlevideo.com/videoplayback?expire=1&sig=secret'))
+        self.assertEqual(line,'ERROR: could not open ~/Library/x at https://rr1.googlevideo.com/videoplayback')
+
+    def test_unreadable_session_stops_early_and_names_the_browser(self):
+        control=set_scan_jobs.ScanControl(api);control.youtube_browser='chrome'
+        failure=subprocess.CalledProcessError(1,['extractor'],stderr='ERROR: could not find chrome cookies database in "/somewhere"')
+        with control.activate(),patch.object(youtube_audio,'resolve',side_effect=AssertionError('Anonymous routes cannot use a session')),patch.object(scan_audio,'segmented',side_effect=failure) as native:
+            with self.assertRaises(ValueError) as caught:scan_audio.obtain(api,WATCH,lambda:None)
+        self.assertEqual(native.call_count,1)
+        self.assertIn('could not read the YouTube session from Chrome',str(caught.exception))
+        self.assertNotIn('public audio connections',str(caught.exception))
+        saved=json.loads((self.root/'set-audio'/'RvRhUHTV_8k'/'attempts.json').read_text())
+        self.assertEqual(saved['browser'],'chrome')
+        self.assertEqual(saved['attempts'],[{'attempt':1,'route':'native','result':'session','detail':'ERROR: could not find chrome cookies database in "/somewhere"'}])
+
+    def test_selected_session_uses_only_session_capable_routes(self):
+        control=set_scan_jobs.ScanControl(api);control.youtube_browser='firefox'
+        clients=[]
+        def native(api,watch,folder,check,client=None):
+            clients.append(client)
+            raise subprocess.CalledProcessError(1,['extractor'],stderr='ERROR: [youtube] RvRhUHTV_8k: Sign in to confirm your age. This video may be inappropriate for some users.')
+        with control.activate(),patch.object(youtube_audio,'resolve',side_effect=AssertionError('Anonymous routes cannot use a session')),patch.object(scan_audio,'segmented',side_effect=native):
+            with self.assertRaises(ValueError) as caught:scan_audio.obtain(api,WATCH,lambda:None)
+        self.assertEqual(clients,[None,'web'])
+        self.assertIn('age verification with the Firefox session',str(caught.exception))
+        public=subprocess.CalledProcessError(1,['extractor'],stderr='ERROR: [youtube] RvRhUHTV_8k: Sign in to confirm your age.')
+        with patch.object(youtube_audio,'resolve',side_effect=public),patch.object(scan_audio,'segmented',side_effect=public):
+            with self.assertRaisesRegex(ValueError,'Choose your signed-in browser under YouTube access'):scan_audio.obtain(api,WATCH,lambda:None)
+
     def test_audio_falls_back_to_m4a_and_reuses_verified_cache(self):
         original=self.audio('original.m4a').read_bytes()
         review={'filename':'Mix.m4a','duration':2,'declared_bytes':len(original),'url':WATCH}

@@ -11,3 +11,4 @@ __pycache__/
 .impeccable/review/
 
 apps/desktop/src-tauri/gen/
+.claude/
