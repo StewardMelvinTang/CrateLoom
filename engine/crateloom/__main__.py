@@ -247,6 +247,8 @@ def validate_analysis(data, expected_duration):
     if not isinstance(duration,(int,float)) or not math.isfinite(duration) or duration<=0 or abs(duration-expected_duration)>1: raise ValueError('Invalid analysis duration')
     if tempo is not None and (not isinstance(tempo,(int,float)) or not math.isfinite(tempo) or tempo<=0): raise ValueError('Invalid tempo')
     if not isinstance(beats,list) or len(beats)>10000 or any(not isinstance(x,(int,float)) or not math.isfinite(x) or x<0 or x>=min(duration,expected_duration) for x in beats) or any(a>=b for a,b in zip(beats,beats[1:])): raise ValueError('Invalid beat positions')
+    grid=data.get('grid')
+    if grid is not None and (not isinstance(grid,dict) or type(grid.get('stable')) is not bool or any(not isinstance(grid.get(k),(int,float)) or isinstance(grid.get(k),bool) or not math.isfinite(grid[k]) for k in ('bpm','origin','agreement')) or not 20<=grid['bpm']<=400 or not 0<=grid['origin']<min(duration,expected_duration) or not 0<=grid['agreement']<=1): raise ValueError('Invalid tempo grid')
     if not isinstance(waveform,dict): raise ValueError('Invalid waveform')
     peaks=waveform.get('peaks'); colors=waveform.get('rgb')
     valid=lambda x:isinstance(x,(int,float)) and math.isfinite(x) and 0<=x<=1
@@ -283,6 +285,11 @@ def preview_grid_beats(t, data):
 def save_auto_cues(db, t, data):
     from .cue_rules import auto_cues
     beats = grid_beats(t, data) if data else []
+    # A straight grid runs from the start of the file; the first cue belongs on
+    # the first beat that was actually heard.
+    if beats and data['beats']:
+        heard = data['beats'][0] + t['grid_offset_us']/1000000 - .1
+        beats = [beat for beat in beats if beat >= heard] or beats
     additions = auto_cues(beats, t['sections'], t['cues'], t['duration'])
     colors = ['#ef5c86','#57b7ee','#9ccc51','#ae7cf5','#edac52','#5acbb7','#d885c3','#b3bec8']
     db.executemany('INSERT INTO cues (track_id,slot,position_us,label,color) VALUES (?,?,?,?,?)',
@@ -328,6 +335,12 @@ def _store_analysis(db, asset, job_id, key, path, data, kind):
                 if fixed or any(abs(round(b*1000000)-asset['grid_anchor_us'])<=1000 for b in data['beats']):
                     db.execute('UPDATE tracks SET grid_cache_key=? WHERE id=?',(key,asset['id']))
         db.execute('UPDATE tracks SET detail_analysis=? WHERE id=?',(json.dumps(detail),asset['id']))
+        # A steady track gets a straight grid by default, as DJ software does.
+        # It is only a starting point: nothing the owner set is replaced, and
+        # it is not exported until bar 1 is confirmed.
+        grid=data.get('grid')
+        if grid and grid['stable'] and asset['grid_bpm'] is None and asset['grid_anchor_us'] is None and not asset['grid_offset_us']:
+            db.execute('UPDATE tracks SET grid_bpm=?,grid_origin_us=?,fixed_grid_key=? WHERE id=?',(grid['bpm'],round(grid['origin']*1000000),key,asset['id']))
         pending = db.execute('UPDATE dj_set_items SET cue_pending=0 WHERE track_id=? AND cue_pending=1', (asset['id'],))
         if pending.rowcount:
             t = track(db, asset['id'])
@@ -402,7 +415,7 @@ def dispatch(method, p):
             stop_set_scans()
             stop_shazam(sys.modules[__name__])
             stop_acquisitions();shutdown(); return {'stopping':True}
-        if method == 'handshake': return {'version':VERSION,'capabilities':['import','waveform','manual_cues','rekordbox_xml','analysis_jobs','beat_tracking','rgb_waveform','manual_sections','optional_structure_suggestions','source_review','direct_https_acquisition','persistent_download_queue'],'fast_sections':True,'semantic_analysis':bool(os.environ.get('CRATELOOM_STRUCTURE_PYTHON')),'structure_max_duration':MAX_STRUCTURE_DURATION,'analysis_python_configured':bool(os.environ.get('CRATELOOM_ANALYSIS_PYTHON'))}
+        if method == 'handshake': return {'version':VERSION,'capabilities':['import','waveform','manual_cues','rekordbox_xml','analysis_jobs','beat_tracking','rgb_waveform','manual_sections','optional_structure_suggestions','source_review','direct_https_acquisition','persistent_download_queue'],'fast_sections':True,'semantic_analysis':bool(os.environ.get('CRATELOOM_STRUCTURE_PYTHON')),'structure_max_duration':MAX_STRUCTURE_DURATION,'analysis_python_configured':bool(os.environ.get('CRATELOOM_ANALYSIS_PYTHON')),'analysis_version':ANALYSIS_VERSION}
         if method.startswith(('playlists.','metadata.')):
             from .preparation import dispatch as prepare
             return prepare(sys.modules[__name__],db,method,p)
