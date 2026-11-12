@@ -1,6 +1,6 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {convertFileSrc} from '@tauri-apps/api/core';
-import {ArrowDown, ArrowUp, FolderOpen, GripVertical, Link2, ListPlus, Music2, Pause, Play, Plus, SlidersHorizontal, Tags, Trash2, Upload, WandSparkles, X} from 'lucide-react';
+import {Activity, ArrowDown, ArrowUp, FolderOpen, GripVertical, Link2, ListPlus, Music2, Pause, Play, Plus, SlidersHorizontal, Tags, Trash2, Upload, WandSparkles, X} from 'lucide-react';
 import {Disclosure} from './Disclosure';
 import {Select} from './Select';
 import {Menu} from './Menu';
@@ -24,6 +24,8 @@ export type LibraryActions = {
   openMetadata: (ids: string[]) => void;
   writeTags: (ids: string[]) => void;
   autoMetadata: (ids: string[]) => void;
+  /** Queue beat analysis for tracks that have none from the current analyser. */
+  analyze: (ids: string[]) => void;
   addToPlaylist: (playlist: Playlist, ids: string[]) => Promise<void>;
   newPlaylist: (ids: string[]) => Promise<void>;
   removeFromPlaylist: (ids: string[]) => Promise<void>;
@@ -93,8 +95,8 @@ const TrackRow = React.memo(function TrackRow({track, order, selected, active, p
   </div>;
 });
 
-export function LibraryView({tracks, playlists, playlist, query, filter, onFilter, loading, selectedIds, onSelectedIds, activeId, playing, ordering, reorder, exporting, importing, metadataBatch, actions}: {
-  tracks: Track[]; playlists: Playlist[]; playlist: Playlist | null; query: string; filter: LibraryFilter; onFilter: (value: LibraryFilter) => void; loading: boolean;
+export function LibraryView({tracks, playlists, playlist, query, filter, onFilter, loading, selectedIds, onSelectedIds, activeId, playing, ordering, reorder, exporting, importing, metadataBatch, unanalysed, actions}: {
+  tracks: Track[]; playlists: Playlist[]; playlist: Playlist | null; unanalysed: ReadonlySet<string>; query: string; filter: LibraryFilter; onFilter: (value: LibraryFilter) => void; loading: boolean;
   selectedIds: string[]; onSelectedIds: (update: (ids: string[]) => string[]) => void; activeId: string | null; playing: boolean; ordering: boolean;
   reorder: ReturnType<typeof useTrackReorder>; exporting: boolean; importing: boolean; metadataBatch: ReturnType<typeof useMetadataBatch>; actions: LibraryActions;
 }) {
@@ -123,6 +125,7 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
   const autoScope = selected.length ? `${selected.length} selected` : narrowed ? `${visible.length} shown` : `all ${plural(visible.length, 'track')}`;
   const autoScopeSentence = selected.length ? `the ${plural(selected.length, 'selected track')}` : narrowed ? `the ${plural(visible.length, 'track')} shown` : `all ${plural(visible.length, 'track')} in ${playlist ? 'this playlist' : 'your library'}`;
   const autoBusy = metadataBatch.starting || metadataBatch.running;
+  const analysisTargets = useMemo(() => autoTargets.filter(id => unanalysed.has(id)), [autoTargets, unanalysed]);
 
   useEffect(() => { if (selectAll.current) selectAll.current.indeterminate = selected.length > 0 && selected.length < visible.length; }, [selected.length, visible.length]);
   useEffect(() => { setExplainAuto(false); setToolError(''); }, [playlist?.id]);
@@ -180,6 +183,9 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
       <button className="auto-metadata" disabled={autoBusy || !autoTargets.length} aria-expanded={explainAuto || undefined}
         title={`Look up title, artist, album and cover online for ${autoScopeSentence}. Results are saved in CrateLoom for review; audio files are not changed until you write tags.`}
         onClick={startAuto}><WandSparkles size={15}/> {metadataBatch.starting ? 'Starting…' : 'Auto metadata'}{autoTargets.length ? ` · ${autoScope}` : ''}</button>
+      {analysisTargets.length > 0 && <button className="analyze-beats"
+        title={`Detect tempo, beat grid and waveform colours for ${plural(analysisTargets.length, 'track')} without a current analysis. Runs in the background, one track at a time; your cues and grid edits are kept.`}
+        onClick={() => actions.analyze(analysisTargets)}><Activity size={15}/> Analyze beats · {analysisTargets.length}</button>}
       {/* Always shown, so ticking a row never moves the list; the buttons explain what a selection is for. */}
       <div className="selection-tools" role="group" aria-label="Actions for selected tracks">
         <span className="selection-count" role="status">{selected.length ? `${selected.length} selected:` : 'Tick tracks to:'}</span>

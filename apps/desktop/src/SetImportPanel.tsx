@@ -612,7 +612,7 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
             <input id="set-playlist-name" aria-label="Set playlist name" maxLength={100} value={name} disabled={reportBusy} onChange={e => setName(e.target.value)}/>
             <button className="primary" disabled={reportBusy || !name.trim()}>{toSearch > 0 ? 'Create playlist and find tracks' : 'Create playlist'}</button>
           </div>
-          <small>Adds the {plural(inLibrary, 'entry', 'entries')} already in your library to a new playlist{toSearch > 0 ? `, then searches for and downloads the other ${plural(toSearch, 'identified entry', 'identified entries')}. Entries with several possible versions wait for your choice.` : '.'}</small>
+          <small>{inLibrary > 0 ? `Adds the ${plural(inLibrary, 'entry', 'entries')} already in your library to a new playlist` : 'Creates a new playlist'}{toSearch > 0 ? `, then searches for and downloads the ${inLibrary > 0 ? 'other ' : ''}${plural(toSearch, 'identified entry', 'identified entries')}. Entries with several possible versions wait for your choice.` : '.'}</small>
         </form>}
       </div>
       {jobHere && <Notice tone="status">{job!.kind === 'local' ? 'Adding the file to your library…' : 'Searching for sources and starting downloads… Entries update as results arrive.'}</Notice>}
@@ -633,7 +633,7 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
           cancelLabel="Pause scan" onCancel={moving ? () => void run(async () => { const next = await call<Report>('sets.cancel_scan', {id: report.id}); if (mounted.current && reportRef.current?.id === next.id) setReport(next); }, setReportError) : undefined}>
           {note && !(status.state === 'waiting' && /rate limit/i.test(note)) && <p className="scan-progress-detail">{isYoutubeAccessError(note) && !moving ? note : `Last attempt: ${note}`}</p>}
           {scan.samples > 0 && !scan.running && <p className="scan-progress-detail">{plural(scan.samples, 'audio sample')} saved{scan.pending_matches ? ` · ${plural(scan.pending_matches, 'match', 'matches')} waiting to be placed` : ''}</p>}
-          {moving && <p className="scan-progress-detail">The scan continues by itself, also when you leave this page. Entries appear below as they are found.{youtubeSet && ` It uses ${saved.name ? `the ${saved.name} session` : 'public YouTube access'}; pause the scan to change that.`}</p>}
+          {moving && <p className="scan-progress-detail">Continues in the background; entries appear below as they are found.{youtubeSet && ` Uses ${saved.name ? `the ${saved.name} session` : 'public YouTube access'} (pause to change).`}</p>}
           {!moving && youtubeSet && <div className="set-resume-access">
             <label>Resume with <Select aria-label="YouTube access for this set" value={resumeAccess} disabled={reportBusy} onChange={e => setResumeAccess(e.target.value)}>
               {YOUTUBE_ACCESS.map(item => <option key={item.value} value={item.value}>{item.label}{item.value === saved.value ? ' (saved with this set)' : ''}</option>)}

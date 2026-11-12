@@ -119,3 +119,5 @@
 
 .set-resume-access { display: grid; justify-items: center; gap: 6px; }
 .set-workspace .set-resume-access label { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; color: var(--text); font-size: 12px; }
+/* Keep Pause scan above the player at the minimum window height. */
+@media (max-height: 720px) { .set-workspace .set-scan-status { margin-bottom: 10px; padding: 10px 12px; } .set-workspace .set-scan-status .scan-progress-detail { margin: 0; } }

@@ -133,7 +133,14 @@ def recording_search(api, text, duration=None, isrc=None):
         ranked = [c for c in rank_candidates({'recordings': list(collected.values())}, duration, identity) if c['match_status'] != 'rejected']
         if ranked:
             break
-    references = [register(api, dict(candidate, kind='reference', provider='MusicBrainz', can_acquire=False)) for candidate in ranked[:15]]
+    # The same recording on the same album is listed once per release country;
+    # those rows are indistinguishable to the owner, so keep the best of each.
+    distinct = {}
+    for candidate in ranked:
+        values = candidate['values']
+        distinct.setdefault((normalized(values.get('title', '')), normalized(values.get('artist', '')), normalized(candidate.get('version') or ''),
+                             normalized(values.get('album', '')), round((candidate.get('duration') or 0) / 2)), candidate)
+    references = [register(api, dict(candidate, kind='reference', provider='MusicBrainz', can_acquire=False)) for candidate in list(distinct.values())[:15]]
     return {'kind': 'references', 'query': identity, 'candidates': references, 'message': None if references else 'No reliable recording reference found. Try artist — title, or paste a direct audio URL.'}
 
 

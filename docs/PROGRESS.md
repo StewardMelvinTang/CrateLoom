@@ -63,3 +63,5 @@ Rekordbox XML now includes the fixed BPM and the adjusted 4/4 downbeat for track
 ## App icon: Crate Dig mark (2026-11-12)
 
 The app icon and title bar mark now use the "Crate Dig" mark: a vinyl record pulled up out of a crate. `src-tauri/icons/CrateLoom.icns` and `icon.png` were replaced; the `.icns` keeps a separately drawn small cut in its 16 and 32 px slots, so don't regenerate it with `tauri icon`. The title bar shows the one-colour small cut (`assets/brand/crateloom-mark-small-black.svg`), which the existing dark-mode rule inverts. The source kit, with lockups, web icons and a usage guide, was produced in the design scratch workspace (`crateloom-brand/crate-dig-kit`). UI colours are unchanged.
+
+November 13: the working tree was committed on `ux-scan-fixes`, followed by the signed-in scan failure fix, engine fault fixes, a constant-tempo grid in beat analysis, and an interface clarity rework. See [UX_SCAN_FIXES_VERIFICATION.md](UX_SCAN_FIXES_VERIFICATION.md) for what was observed and what remains open.

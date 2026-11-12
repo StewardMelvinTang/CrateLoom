@@ -2,6 +2,17 @@
 
 Snapshot: 2026-11-12, Asia/Taipei. This document describes the current working tree and the latest installed local build. It separates implemented behavior, observed results, and remaining work.
 
+## 0. Update, 2026-11-13
+
+Read [the November 13 verification note](docs/UX_SCAN_FIXES_VERIFICATION.md) first; where it and this document differ, it is newer.
+
+- The whole working tree described below is now committed, with later fixes, on branch `ux-scan-fixes` (not pushed; `main` is unchanged). The installed app is still the November 12 build.
+- Section 6: the generic failure seen with a selected browser was an unreadable browser session reported as a connection problem. That is fixed and tested with fixtures; an anonymous scan of the supplied mix now shows the age-verification message beside the YouTube access control. Reading a real browser session is still unverified and still needs the owner's own run.
+- New engine methods: `playlists.delete`, `library.remove`, `acquisitions.clear_failed`. Analysis version is `librosa-0.11.0-grid-6` and beat analysis fits a constant-tempo grid.
+- The frontend was split: `main.tsx` holds state and engine calls; views are in `LibraryView.tsx`, `CueEditor.tsx`, `PlayerBar.tsx`. Engine calls go through `engine.ts`.
+- `scripts/preview-browser.mjs` runs the interface in a browser against a real engine and a disposable library (`CRATELOOM_DATA` is required).
+- Baseline is now 170 Python tests, 14 frontend tests, 2 Rust tests, and the interaction harness passing in Chromium and WebKit.
+
 ## 1. Overview And Product Goal
 
 CrateLoom is a local-first desktop application for preparing music for DJ use, with rekordbox as its first export target. Its purpose is to reduce the repetitive work between finding a recording and having a usable, organized, analyzed track in a DJ library.

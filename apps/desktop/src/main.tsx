@@ -144,6 +144,8 @@ function App() {
   const locked = saving || importing;
 
   const queueAnalysis = useCallback((ids: string[]) => { if (ids.length) setAutoQueue(queue => [...new Set([...queue, ...ids])]); }, []);
+  // Tracks whose saved analysis is missing or from an older analyser, minus those already waiting.
+  const unanalysed = React.useMemo(() => new Set(tracks.filter(track => needsAnalysis(track, analysisVersion) && !autoQueue.includes(track.id) && track.id !== job?.track_id).map(track => track.id)), [tracks, analysisVersion, autoQueue, job?.track_id]);
 
   const refresh = useCallback(async () => {
     const revision = orderRevision.current;
@@ -794,7 +796,8 @@ function App() {
       </div>}
       {!editor && workspace === 'library' && <LibraryView tracks={tracks} playlists={playlists} playlist={currentPlaylist} query={query} filter={libraryFilter} onFilter={setLibraryFilter}
         loading={!libraryLoaded} selectedIds={selectedIds} onSelectedIds={setSelectedIds} activeId={active?.id ?? null} playing={playing} ordering={ordering} reorder={playlistReorder} exporting={exporting} importing={importing || batchRunning}
-        metadataBatch={metadataBatch} actions={{
+        metadataBatch={metadataBatch} unanalysed={unanalysed} actions={{
+          analyze: queueAnalysis,
           select: track => void choose(track),
           edit: track => void choose(track, true),
           togglePlay: track => { if (active?.id === track.id) toggle(); else void choose(track, false, true); },
