@@ -40,10 +40,14 @@ export function usePanelMorph(ref:RefObject<HTMLElement>) {
 
 let currentTransition:{skipTransition:()=>void}|undefined;
 export function transitionWorkspace(update:()=>void) {
-  const documentWithMotion = document as Document & {startViewTransition?:(update:()=>void)=>{skipTransition:()=>void;finished:Promise<void>}};
-  if (!documentWithMotion.startViewTransition || reducedMotion()) { update(); return; }
+  const documentWithMotion = document as Document & {startViewTransition?:(update:()=>void)=>{skipTransition:()=>void;finished:Promise<void>;ready?:Promise<void>;updateCallbackDone?:Promise<void>}};
+  // A hidden window cannot animate; apply the change directly instead of starting a transition that aborts.
+  if (!documentWithMotion.startViewTransition || reducedMotion() || document.hidden) { update(); return; }
   currentTransition?.skipTransition();
   const transition = documentWithMotion.startViewTransition(() => flushSync(update));
   currentTransition = transition;
+  // A skipped or aborted transition still applies the update; its rejections are expected.
+  void transition.ready?.catch(()=>{});
+  void transition.updateCallbackDone?.catch(error=>{if(!['AbortError','InvalidStateError'].includes(error?.name))console.error(error);});
   void transition.finished.catch(()=>{}).finally(()=>{if(currentTransition===transition)currentTransition=undefined;});
 }

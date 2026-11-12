@@ -1,11 +1,11 @@
 import {useEffect, useRef, useState, type ReactNode} from 'react';
 
-export function Sidebar({visible, collapsed, onCollapsedChange:setCollapsed, children}: {visible:boolean; collapsed:boolean; onCollapsedChange:(value:boolean)=>void; children:ReactNode}) {
+export function Sidebar({collapsed, onCollapsedChange:setCollapsed, children}: {collapsed:boolean; onCollapsedChange:(value:boolean)=>void; children:ReactNode}) {
   const [width,setWidth] = useState(() => Math.min(340,Math.max(180,Number(localStorage.getItem('sidebarWidth')) || 216)));
   const [resizing,setResizing] = useState(false);
   const drag = useRef<{pointer:number;x:number;width:number}|null>(null);
   useEffect(() => {localStorage.setItem('sidebarWidth',String(width));localStorage.setItem('sidebarCollapsed',String(collapsed));},[width,collapsed]);
-  return <aside id="library-sidebar" hidden={!visible} className={`sidebar ${collapsed?'sidebar-collapsed':''} ${resizing?'sidebar-resizing':''}`} style={{width:collapsed?64:width}} aria-label="Library navigation">
+  return <aside id="library-sidebar" className={`sidebar ${collapsed?'sidebar-collapsed':''} ${resizing?'sidebar-resizing':''}`} style={{width:collapsed?64:width}} aria-label="Library navigation">
     <div className="sidebar-content">{children}</div>
     <div className="sidebar-resizer" role="separator" tabIndex={0} aria-label="Resize sidebar" aria-orientation="vertical" aria-valuemin={64} aria-valuemax={340} aria-valuenow={collapsed?64:width}
       onDoubleClick={() => {setCollapsed(false);setWidth(216);}}

@@ -1,0 +1,39 @@
+/* Metadata editor, automatic metadata banner and tag writing. Loaded after the global sheets. */
+.metadata-notice { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; margin: 10px 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--text); font-size: 12px; line-height: 1.5; }
+.metadata-notice[data-tone=error] { border-color: var(--control-line); }
+.metadata-notice > svg { flex: none; margin-top: 2px; }
+.metadata-notice > span { flex: 1 1 200px; min-width: 0; overflow-wrap: anywhere; }
+.metadata-notice > button { flex: none; padding: 4px 8px; font-size: 12px; }
+.metadata-window .metadata-notice-dismiss { padding: 3px; border-color: transparent; background: transparent; color: var(--muted); }
+.metadata-window .metadata-notice-dismiss:hover { color: var(--text); border-color: var(--line); }
+.metadata-auto-note strong { font-weight: 600; }
+.metadata-window .metadata-field-error { display: flex; align-items: center; gap: 5px; margin-top: 4px; color: var(--text); font-size: 11px; line-height: 1.4; }
+.metadata-fields input[aria-invalid=true] { border-color: var(--text); }
+.metadata-window .metadata-staged { margin: 14px 0 0; font-size: 12px; color: var(--text); }
+.metadata-artwork small { line-height: 1.4; }
+.metadata-lookup small { line-height: 1.4; }
+
+/* Automatic metadata banner */
+.metadata-batch-progress > * { grid-column: 1; min-width: 0; }
+.metadata-batch-progress > .metadata-batch-actions { grid-column: 2; grid-row: 1 / span 6; flex-wrap: wrap; justify-content: flex-end; }
+.metadata-batch-explain { line-height: 1.5; }
+.metadata-batch-progress .metadata-batch-error { display: flex; align-items: flex-start; gap: 6px; margin: 0; color: var(--text); }
+.metadata-batch-error > span { flex: 1; min-width: 0; }
+.metadata-batch-error > button { padding: 2px; border-color: transparent; background: transparent; }
+p.metadata-batch-error { font-size: 12px; }
+.metadata-batch-reasons ul { margin: 4px 0 2px; padding: 0; list-style: none; display: grid; gap: 6px; max-height: 180px; overflow: auto; }
+.metadata-batch-reasons li { display: grid; gap: 1px; line-height: 1.45; }
+.metadata-batch-reasons li span { color: var(--muted); overflow-wrap: anywhere; }
+.metadata-batch-progress.metadata-batch-collapsed { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 12px; color: var(--muted); }
+.metadata-batch-collapsed button { flex: none; padding: 4px 9px; font-size: 12px; }
+@media (max-width: 1100px) {
+  .metadata-batch-progress > .metadata-batch-actions { grid-column: 1 / -1; grid-row: auto; justify-content: flex-start; }
+}
+
+/* Tag writing */
+.tag-write-window h3.tag-review-heading { margin: 16px 0 0; font-size: 12px; font-weight: 600; color: var(--muted); }
+.tag-write-outcome { display: inline-flex; align-items: flex-start; gap: 6px; }
+.tag-write-window .tag-review-row .tag-write-outcome { color: var(--text); }
+.tag-write-outcome > svg { flex: none; margin-top: 2px; }
+.tag-write-window .metadata-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tag-write-window .metadata-actions > span { font-size: 12px; color: var(--muted); }

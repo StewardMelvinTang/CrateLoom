@@ -1,7 +1,10 @@
+import {useEffect, useState, type ReactNode} from 'react';
+import {invoke, convertFileSrc} from '@tauri-apps/api/core';
+import {AlertTriangle, Check, ChevronRight, Download, ExternalLink, FolderOpen, Info, Link2, LoaderCircle, Music2, RotateCcw, Search, X} from 'lucide-react';
+import {call, message as errorText} from './engine';
 import {Disclosure} from './Disclosure';
-import React,{useEffect,useRef,useState} from 'react';
-import {invoke,convertFileSrc} from '@tauri-apps/api/core';
-import {Search,Link2,Download,RotateCcw,X,Music2,ChevronRight,ExternalLink,FolderOpen} from 'lucide-react';
+import {clearFailedDownloads, describeDownloadError, downloadStateLabel, formatBytes, groupDownloads, isActiveDownload, isRetryableDownload} from './Downloads';
+import './discovery.css';
 
 export type AcquisitionJob={id:string;state:string;stage:string;title:string;artist:string;version:string;downloaded_bytes:number;total_bytes:number|null;track_id:string|null;path:string|null;error:string|null;duplicate:boolean;attempt:number;source_url:string;quality:null|{codec:string;container:string;sample_rate:number;channels:number;bit_rate:number;duration:number;bytes:number;sha256:string;resolved_url:string;converted:boolean;reference_url:string|null}};
 type Candidate={id:string;adapter?:'youtube';kind:'direct'|'reference';provider:string;values:Record<string,string>;version:string;source_url?:string;display_url?:string;url?:string;filename?:string;declared_bytes?:number|null;duration?:number|null;release_id?:string;release_kind?:string;release_country?:string;creator?:string;guidance?:string};
@@ -10,89 +13,142 @@ type Capabilities={download_directory:string;max_bytes:number;providers:Provider
 type Result={kind?:string;query?:{title:string;artist:string;version:string};candidates?:Candidate[];message?:string|null;path?:string;reference_id?:string};
 type Task={id:string;state:string;error:string|null;result:Result|null};
 export type AcquisitionReview={source_id:string;reference_id?:string;values:Record<string,string>;version:string;artwork_path:string|null};
-const call=<T,>(method:string,params:object={})=>invoke<T>('engine_call',{method,params});
-const activeStates=['queued','downloading','verifying','importing','cancelling'];
-const bytes=(value:number)=>value>=1024*1024?`${(value/1024/1024).toFixed(1)} MB`:`${Math.round(value/1024)} KB`;
 const duration=(value:number)=>`${Math.floor(value/60)}:${Math.floor(value%60).toString().padStart(2,'0')}`;
 
+// Find Music unmounts whenever another workspace is opened. The search lives here so a typed
+// query, a running lookup and its results are still there when the user comes back.
+type Memory={query:string;sourceUrl:string;task:Task|null;intent:'search'|'source'|'cover';references:Candidate[];reference:Candidate|null;source:Candidate|null;values:Record<string,string>;version:string;artwork:string|null;note:string;error:string;generation:number};
+const memory:Memory={query:'',sourceUrl:'',task:null,intent:'search',references:[],reference:null,source:null,values:{title:'',artist:''},version:'',artwork:null,note:'',error:'',generation:0};
+function useRemembered<K extends keyof Memory>(key:K):[Memory[K],(value:Memory[K])=>void] {
+  const [value,setValue]=useState(memory[key]);
+  // Writing to the store first means a result that arrives while the panel is closed is not lost.
+  return [value,next=>{memory[key]=next;setValue(next);}];
+}
+
+function Notice({children,tone='error',onDismiss,action}:{children:ReactNode;tone?:'error'|'status';onDismiss?:()=>void;action?:ReactNode}) {
+  return <div className="discovery-notice" data-tone={tone} role={tone==='error'?'alert':'status'}>
+    {tone==='error'?<AlertTriangle size={15} aria-hidden="true"/>:<Info size={15} aria-hidden="true"/>}
+    <span>{children}</span>
+    {action}
+    {onDismiss && <button type="button" className="discovery-notice-dismiss" aria-label="Dismiss message" title="Dismiss" onClick={onDismiss}><X size={14}/></button>}
+  </div>;
+}
+
 export function DiscoveryPanel({jobs,error:queueError,onQueue,onCancel,onRetry,onOpen,onRefresh,onImport}:{jobs:AcquisitionJob[];error:string;onQueue:(review:AcquisitionReview)=>Promise<void>;onCancel:(id:string)=>Promise<void>;onRetry:(id:string)=>Promise<void>;onOpen:(id:string)=>Promise<void>;onRefresh:()=>Promise<void>;onImport:()=>Promise<void>}){
- const [query,setQuery]=useState(''),[sourceUrl,setSourceUrl]=useState(''),[capabilities,setCapabilities]=useState<Capabilities|null>(null);
- const [task,setTask]=useState<Task|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState('');
- const [references,setReferences]=useState<Candidate[]>([]),[reference,setReference]=useState<Candidate|null>(null),[source,setSource]=useState<Candidate|null>(null);
- const [values,setValues]=useState<Record<string,string>>({title:'',artist:''}),[version,setVersion]=useState(''),[artwork,setArtwork]=useState<string|null>(null);
- const generation=useRef(0),intent=useRef<'search'|'source'|'cover'>('search');
- useEffect(()=>{let stopped=false;call<Capabilities>('providers.capabilities').then(c=>{if(!stopped)setCapabilities(c);}).catch(e=>{if(!stopped)setError(String(e));});return()=>{stopped=true;generation.current++;};},[]);
- const working=busy || task?.state==='running';
- const action=async(fn:()=>Promise<void>)=>{setBusy(true);setError('');try{await fn();}catch(e){setError(String(e));}finally{setBusy(false);}};
+ const [query,setQuery]=useRemembered('query'),[sourceUrl,setSourceUrl]=useRemembered('sourceUrl');
+ const [task,setTask]=useRemembered('task'),[intent,setIntent]=useRemembered('intent');
+ const [references,setReferences]=useRemembered('references'),[reference,setReference]=useRemembered('reference'),[source,setSource]=useRemembered('source');
+ const [values,setValues]=useRemembered('values'),[version,setVersion]=useRemembered('version'),[artwork,setArtwork]=useRemembered('artwork');
+ const [note,setNote]=useRemembered('note'),[error,setError]=useRemembered('error');
+ const [capabilities,setCapabilities]=useState<Capabilities|null>(null);
+ const [clearing,setClearing]=useState(false),[listError,setListError]=useState('');
+ const [busy,setBusy]=useState(false),[rowBusy,setRowBusy]=useState<string[]>([]),[rowErrors,setRowErrors]=useState<Record<string,string>>({});
+ useEffect(()=>{let stopped=false;call<Capabilities>('providers.capabilities').then(c=>{if(!stopped)setCapabilities(c);}).catch(()=>{/* only the optional "what can be downloaded" list is missing */});return()=>{stopped=true;};},[]);
+ const looking=task?.state==='running';
+ const working=busy || looking;
+ const action=async(fn:()=>Promise<void>)=>{if(busy)return;setBusy(true);setError('');try{await fn();}catch(e){setError(errorText(e));}finally{setBusy(false);}};
+ const rowAction=async(id:string,fn:()=>Promise<void>)=>{
+  if(rowBusy.includes(id))return;
+  setRowBusy(ids=>[...ids,id]);setRowErrors(errors=>({...errors,[id]:''}));
+  try{await fn();}catch(e){setRowErrors(errors=>({...errors,[id]:errorText(e)}));}finally{setRowBusy(ids=>ids.filter(item=>item!==id));}
+ };
+ const selectReference=(candidate:Candidate)=>{setReference(candidate);setValues(candidate.values);setVersion(candidate.version || '');setArtwork(null);setSource(null);setSourceUrl('');setError('');setNote('');};
+ const startOver=()=>{memory.generation++;setTask(null);setReferences([]);setReference(null);setSource(null);setArtwork(null);setValues({title:'',artist:''});setVersion('');setSourceUrl('');setNote('');setError('');};
  const resolve=(text:string,kind:'search'|'source')=>action(async()=>{
-  setMessage('');setSource(null);
+  setNote('');setSource(null);
   if(kind==='search'){setReferences([]);setReference(null);setArtwork(null);setValues({title:'',artist:''});setVersion('');setSourceUrl('');}
-  intent.current=kind;const current=++generation.current;
-  const next=await call<Task>('providers.resolve',{query:text});if(current===generation.current)setTask(next);
+  setIntent(kind);const current=++memory.generation;
+  const next=await call<Task>('providers.resolve',{query:text.trim()});if(current===memory.generation)setTask(next);
  });
  useEffect(()=>{
   if(!task || task.state!=='running')return;let stopped=false;
+  const started=memory.generation;
   const timer=window.setTimeout(async()=>{
    try{
-    const next=await call<Task>('providers.job',{id:task.id});if(stopped)return;setTask(next);
+    const next=await call<Task>('providers.job',{id:task.id});
+    // Compare with the store, not this render: the panel may have been closed and reopened meanwhile.
+    if(started!==memory.generation || memory.task?.id!==task.id)return;
+    if(stopped && next.state==='running')return;
+    setTask(next);
     if(next.error){setError(next.error);return;}
     const result=next.result;if(!result)return;
-    if(result.path && result.reference_id===reference?.id)setArtwork(result.path);
-    if(result.kind==='references'){setReferences(result.candidates || []);setMessage(result.message || 'Choose the recording, then add its direct audio download link.');}
+    if(result.path && result.reference_id===memory.reference?.id)setArtwork(result.path);
+    if(result.kind==='references'){
+     setReferences(result.candidates || []);
+     if(!result.candidates?.length)setNote(result.message || 'No recording was found for that search. Check the spelling, or paste a link to the track instead.');
+    }
     if(result.kind==='service_reference'){
      const found=result.candidates?.[0];if(!found)return;
-     if(intent.current==='source'){setError('This is a reference page. Paste a direct audio file link.');return;}
+     if(memory.intent==='source'){setError(`That is a ${found.provider} page, not an audio file. Paste a YouTube link or a direct link to an audio file.`);return;}
      selectReference(found);
     }
     if(result.kind==='direct'){
      const found=result.candidates?.[0];if(!found)return;
      setSource(found);setSourceUrl(found.url || '');
-     if(!reference){setValues(found.values);setVersion(found.version || '');}
-     setMessage(found.adapter==='youtube'?'Audio found. Review the track, then download and import.':'Review the title and version before adding this source.');
+     if(!memory.reference){setValues(found.values);setVersion(found.version || '');}
     }
-   }catch(e){if(!stopped){setTask(null);setError(String(e));}}
+   }catch(e){if(started===memory.generation){setTask(null);setError(errorText(e));}}
   },400);
   return()=>{stopped=true;clearTimeout(timer);};
- },[task,reference?.id]);
- const selectReference=(candidate:Candidate)=>{setReference(candidate);setValues(candidate.values);setVersion(candidate.version || '');setArtwork(null);setSource(null);setSourceUrl('');setError('');setMessage(candidate.guidance || 'Add the direct download link for this version.');};
- return <section className="discovery-workspace">
-  <form className="discovery-search" onSubmit={e=>{e.preventDefault();void resolve(query,'search');}}>
-   <label htmlFor="discovery-query">Song name or audio URL</label>
-   <div><Search size={18}/><input id="discovery-query" placeholder="Artist — title or https://…" value={query} maxLength={4096} disabled={working} onChange={e=>setQuery(e.target.value)}/><button className="primary" disabled={working || !query.trim()} type="submit">Find source</button></div>
-  </form>
-  {!source && !reference && references.length===0 && !working && !message && <p className="discovery-help">Search by name, paste a service link, or use a direct audio file URL.</p>}
-  {working && <p className="discovery-message" role="status">{intent.current==='cover'?'Finding release artwork…':'Resolving source…'}</p>}
-  {message && <p className="discovery-message" role="status">{message}</p>}
-  {(error || queueError) && <p className="metadata-error" role="alert">{error || queueError}</p>}
-  {references.length>0 && <div className="discovery-references" role="group" aria-label="Recording references">{references.map(candidate=><button key={candidate.id} disabled={working} aria-pressed={reference?.id===candidate.id} onClick={()=>selectReference(candidate)}>
-   <strong>{candidate.values.title}</strong><span>{candidate.values.artist || 'Artist unavailable'}</span><small>{[candidate.values.album,candidate.values.date,candidate.release_country,candidate.duration!=null?duration(candidate.duration):''].filter(Boolean).join(' · ')}</small>
-  </button>)}</div>}
-  {(reference || source) && <div className="discovery-review">
-   <div className="discovery-review-heading"><h2>Review source</h2>{source && <span>{source.adapter==='youtube'?`${source.provider} · M4A · No conversion`:'Original file · No conversion'}</span>}</div>
-   {reference && <div className="discovery-reference-source"><span>Recording reference · {reference.provider}</span>{(reference.creator || reference.values.album || reference.version) && <small>{[reference.creator && 'Uploaded by '+reference.creator,reference.values.album,reference.version].filter(Boolean).join(' · ')}</small>}{reference.guidance && reference.source_url && <div className="service-reference-actions"><button disabled={working} onClick={()=>void action(()=>invoke<void>('open_reference',{url:reference.source_url}))}><ExternalLink size={14}/> Open on {reference.provider}</button><button disabled={working} onClick={()=>void action(onImport)}><FolderOpen size={14}/> Add local file</button></div>}</div>}
-   {reference && <form className="direct-url-form" onSubmit={e=>{e.preventDefault();void resolve(sourceUrl,'source');}}><label htmlFor="direct-audio-url">Direct audio download URL</label><div><Link2 size={16}/><input id="direct-audio-url" type="url" placeholder="https://artist.example/track.flac" maxLength={4096} disabled={working} value={sourceUrl} onChange={e=>{setSourceUrl(e.target.value);setSource(null);}}/><button disabled={working || !sourceUrl.trim()}>Resolve link</button></div></form>}
-   {source && <p className="discovery-source-url" title={source.display_url}>{source.display_url}{source.declared_bytes!=null?` · ${bytes(source.declared_bytes)}`:''}</p>}
-   <div className="discovery-review-body">
-    {reference?.release_id && <div className="discovery-cover">{artwork?<img src={convertFileSrc(artwork)} alt="Selected release cover"/>:<div><Music2 size={26}/></div>}<button disabled={working} onClick={()=>void action(async()=>{intent.current='cover';setTask(await call<Task>('providers.cover',{reference_id:reference.id}));})}>Load cover</button></div>}
-    <div className="discovery-fields"><label>Title<input aria-label="Download title" maxLength={500} disabled={working} value={values.title || ''} onChange={e=>setValues({...values,title:e.target.value})}/></label><label>Artist<input aria-label="Download artist" maxLength={500} disabled={working} value={values.artist || ''} onChange={e=>setValues({...values,artist:e.target.value})}/></label><label>Version<input aria-label="Download version" maxLength={200} disabled={working} placeholder="Original, remix or edit, if known" value={version} onChange={e=>setVersion(e.target.value)}/></label></div>
+ },[task]);
+ const {active,unfinished,completed}=groupDownloads(jobs);
+ const limit=capabilities?`${Math.round(capabilities.max_bytes/1024/1024)} MB`:null;
+ const downloadRow=(job:AcquisitionJob)=>{
+  const quality=job.quality,pending=rowBusy.includes(job.id),problem=describeDownloadError(job.error);
+  return <article className="download-row" key={job.id}>
+   <div className="download-row-head"><div><strong title={job.title}>{job.title}</strong>{(job.artist || job.version) && <span>{[job.artist,job.version].filter(Boolean).join(' · ')}</span>}</div>
+    <span className="download-state">{downloadStateLabel(job)}{job.attempt>1?` · Attempt ${job.attempt}`:''}</span>
+    {isActiveDownload(job.state) && <button disabled={pending || job.state==='cancelling'} aria-label={`Cancel download ${job.title}`} title="Cancel this download" onClick={()=>void rowAction(job.id,()=>onCancel(job.id))}><X size={14} aria-hidden="true"/> Cancel</button>}
+    {isRetryableDownload(job.state) && <button disabled={pending} aria-label={`Retry download ${job.title}`} title="Start this download again" onClick={()=>void rowAction(job.id,()=>onRetry(job.id))}><RotateCcw size={14} aria-hidden="true"/> Retry</button>}
+    {job.state==='completed' && job.track_id && <button disabled={pending} aria-label={`Open ${job.title} in the library`} title="Show this track in the library" onClick={()=>void rowAction(job.id,()=>onOpen(job.track_id!))}>Open track<ChevronRight size={14} aria-hidden="true"/></button>}
    </div>
-   <div className="discovery-review-actions"><small>File integrity and audio format are checked after download. Metadata is saved to the library; file tags stay unchanged.</small><button className="primary" disabled={working || !source || !values.title?.trim()} onClick={()=>void action(async()=>{if(!source)return;await onQueue({source_id:source.id,...(reference?{reference_id:reference.id}:{}),values,version,artwork_path:artwork});setMessage('Added to downloads. Analysis starts after import.');})}><Download size={16}/> Download &amp; import</button></div>
+   {isActiveDownload(job.state) && <div className="download-progress"><progress aria-label={`Download progress ${job.title}`} {...(job.total_bytes && job.total_bytes>0?{max:job.total_bytes,value:Math.min(job.downloaded_bytes,job.total_bytes)}:{})}/><small>{formatBytes(job.downloaded_bytes)}{job.total_bytes!=null?` / ${formatBytes(job.total_bytes)}`:''}</small></div>}
+   {problem && <p className="download-problem-text">{problem.text}</p>}
+   {rowErrors[job.id] && <Notice onDismiss={()=>setRowErrors(errors=>({...errors,[job.id]:''}))}>{rowErrors[job.id]}</Notice>}
+   {quality && <p className="download-quality">{quality.container.toUpperCase()}{quality.codec!==quality.container?` · ${quality.codec.toUpperCase()}`:''}{quality.bit_rate?` · ${Math.round(quality.bit_rate/1000)} kbps`:''}{quality.sample_rate?` · ${quality.sample_rate/1000} kHz`:''}{quality.channels?` · ${quality.channels===2?'Stereo':quality.channels===1?'Mono':`${quality.channels} channels`}`:''} · {duration(quality.duration)} · {formatBytes(quality.bytes)}{quality.converted?'':' · Not converted'}{job.duplicate?' · Already in your library, so the existing track was kept':''}</p>}
+   <Disclosure className="download-provenance" label="Source and file details">{problem?.detail && <small>Error reported: <code>{problem.detail}</code></small>}<label>Source link<input readOnly value={job.source_url} onFocus={e=>e.currentTarget.select()}/></label>{quality?.resolved_url!==job.source_url && quality?.resolved_url && <label>Downloaded from<input readOnly value={quality.resolved_url} onFocus={e=>e.currentTarget.select()}/></label>}{quality?.reference_url && <label>Recording reference<input readOnly value={quality.reference_url} onFocus={e=>e.currentTarget.select()}/></label>}{job.path && <label>Saved file<input readOnly value={job.path} onFocus={e=>e.currentTarget.select()}/></label>}{quality && <small>File checksum (SHA-256) <code>{quality.sha256}</code></small>}</Disclosure>
+  </article>;
+ };
+ const group=(label:string,icon:ReactNode,items:AcquisitionJob[],tool?:ReactNode)=>items.length>0 && <section className="download-group" aria-label={label}><h3>{icon}<span>{label} · {items.length}</span>{tool}</h3>{items.map(downloadRow)}</section>;
+ const clearFailed=async()=>{if(clearing)return;setClearing(true);setListError('');try{await clearFailedDownloads();await onRefresh();}catch(e){setListError(errorText(e));}finally{setClearing(false);}};
+ return <section className="discovery-workspace">
+  <form className="discovery-search" onSubmit={e=>{e.preventDefault();if(!working && query.trim())void resolve(query,'search');}}>
+   <label htmlFor="discovery-query">Song name or link</label>
+   <div><Search size={18} aria-hidden="true"/><input id="discovery-query" placeholder="Artist and title, or https://…" value={query} maxLength={4096} disabled={working} onChange={e=>setQuery(e.target.value)}/><button className="primary" disabled={working || !query.trim()} type="submit">Find</button></div>
+   <p className="discovery-help">A name search finds the recording and its details. A YouTube link or a direct link to an audio file can be downloaded. Spotify and SoundCloud links are used as a reference only.</p>
+  </form>
+  {looking && <p className="discovery-message" role="status"><LoaderCircle size={14} className="spin" aria-hidden="true"/> {intent==='cover'?'Looking for cover art…':intent==='source'?'Checking the link…':'Searching…'}</p>}
+  {error && <Notice onDismiss={()=>setError('')}>{error}</Notice>}
+  {note && <Notice tone="status" onDismiss={()=>setNote('')}>{note}</Notice>}
+  {references.length>0 && <section className="discovery-results" aria-label="Recordings found">
+   <div className="discovery-results-head"><h2>Recordings found · {references.length}</h2><button type="button" disabled={working} onClick={startOver}>Clear results</button></div>
+   <p className="discovery-help">These identify a recording so its title, artist and release are right. They are references, not downloads: choose one, then add a link to its audio.</p>
+   <div className="discovery-references" role="group" aria-label="Recording references">{references.map(candidate=><button key={candidate.id} disabled={working} aria-pressed={reference?.id===candidate.id} onClick={()=>selectReference(candidate)}>
+    <strong>{candidate.values.title}{candidate.version?` (${candidate.version})`:''}</strong><span>{candidate.values.artist || 'Artist unavailable'}</span><small>{[candidate.values.album,candidate.values.date,candidate.release_country,candidate.duration!=null?duration(candidate.duration):'',`${candidate.provider} reference`].filter(Boolean).join(' · ')}</small>
+   </button>)}</div>
+  </section>}
+  {(reference || source) && <div className="discovery-review">
+   <div className="discovery-review-heading"><h2>{source?'Review before downloading':'Add the audio for this recording'}</h2>{references.length===0 && <button type="button" disabled={working} onClick={startOver}>Start over</button>}</div>
+   {reference && <div className="discovery-reference-source"><span><strong>{[reference.values.artist,reference.values.title].filter(Boolean).join(' – ')}</strong> · {reference.provider} reference, not a download</span>{(reference.creator || reference.values.album || reference.version) && <small>{[reference.creator && 'Uploaded by '+reference.creator,reference.values.album,reference.version].filter(Boolean).join(' · ')}</small>}
+    {reference.guidance && <small>{reference.guidance}</small>}
+    {reference.guidance && reference.source_url && <div className="service-reference-actions"><button disabled={working} onClick={()=>void action(()=>invoke<void>('open_reference',{url:reference.source_url}))}><ExternalLink size={14} aria-hidden="true"/> Open on {reference.provider}</button><button disabled={working} title="Add an audio file you already have on this Mac to the library" onClick={()=>void action(onImport)}><FolderOpen size={14} aria-hidden="true"/> Add a file from this Mac</button></div>}</div>}
+   {reference && <form className="direct-url-form" onSubmit={e=>{e.preventDefault();if(!working && sourceUrl.trim())void resolve(sourceUrl,'source');}}><label htmlFor="direct-audio-url">Audio link</label><div><Link2 size={16} aria-hidden="true"/><input id="direct-audio-url" type="url" placeholder="A YouTube link, or a direct link to an audio file" maxLength={4096} disabled={working} value={sourceUrl} onChange={e=>{setSourceUrl(e.target.value);setSource(null);}}/><button disabled={working || !sourceUrl.trim()}>Check link</button></div></form>}
+   {source && <p className="discovery-source-url" title={source.display_url}><Check size={13} aria-hidden="true"/> Audio found · {source.adapter==='youtube'?`${source.provider}, M4A as published`:'original file'}{source.declared_bytes!=null?` · ${formatBytes(source.declared_bytes)}`:''}{source.duration!=null?` · ${duration(source.duration)}`:''} · {source.display_url}</p>}
+   {source && <p className="discovery-help">Check that this is the version you want. CrateLoom has not confirmed that it is a particular remix or edit{reference?.duration!=null && source.duration!=null && Math.abs(reference.duration-source.duration)>Math.max(5,reference.duration*.04)?`; its length (${duration(source.duration)}) differs from the chosen recording (${duration(reference.duration)})`:''}.</p>}
+   <div className="discovery-review-body">
+    {reference?.release_id && <div className="discovery-cover">{artwork?<img src={convertFileSrc(artwork)} alt="Selected release cover"/>:<div><Music2 size={26} aria-hidden="true"/></div>}<button disabled={working} onClick={()=>void action(async()=>{setIntent('cover');memory.generation++;setTask(await call<Task>('providers.cover',{reference_id:reference.id}));})}>{artwork?'Find cover again':'Find cover art'}</button></div>}
+    <div className="discovery-fields"><label>Title<input aria-label="Download title" maxLength={500} disabled={working} value={values.title || ''} onChange={e=>setValues({...values,title:e.target.value})}/></label><label>Artist<input aria-label="Download artist" maxLength={500} disabled={working} value={values.artist || ''} onChange={e=>setValues({...values,artist:e.target.value})}/></label><label>Version<input aria-label="Download version" maxLength={200} disabled={working} placeholder="For example Extended Mix. Leave empty if unsure." value={version} onChange={e=>setVersion(e.target.value)}/></label></div>
+   </div>
+   <div className="discovery-review-actions"><small>{source?'The file is checked after download and added to your library with these details. The audio is not converted and its tags are not changed.':'Add an audio link above to download this recording.'}</small><button className="primary" disabled={working || !source || !values.title?.trim()} onClick={()=>void action(async()=>{if(!source)return;await onQueue({source_id:source.id,...(reference?{reference_id:reference.id}:{}),values,version,artwork_path:artwork});startOver();setQuery('');setNote('Added to Downloads below. The track is analyzed after it is added to your library.');})}><Download size={16} aria-hidden="true"/> Download and add to library</button></div>
   </div>}
-  <div className="download-queue-head"><h2>Downloads</h2><button className="icon" aria-label="Refresh downloads" title="Refresh downloads" onClick={()=>void action(onRefresh)}><RotateCcw size={15}/></button></div>
-  {jobs.length===0?<p className="discovery-help">Downloaded tracks will appear here and in your library.</p>:<div className="download-queue">{jobs.map(job=>{
-   const active=activeStates.includes(job.state),quality=job.quality;
-   return <article className="download-row" key={job.id}>
-    <div className="download-row-head"><div><strong>{job.title}</strong>{job.artist && <span>{job.artist}{job.version?` · ${job.version}`:''}</span>}</div><span className="download-state">{job.stage}{job.attempt>1?` · Attempt ${job.attempt}`:''}</span>
-     {active && <button disabled={job.state==='cancelling'} aria-label={`Cancel download ${job.title}`} title="Cancel download" onClick={()=>void action(()=>onCancel(job.id))}><X size={15}/></button>}
-     {['failed','cancelled','interrupted'].includes(job.state) && <button disabled={busy} onClick={()=>void action(()=>onRetry(job.id))}><RotateCcw size={14}/> Retry</button>}
-     {job.state==='completed' && job.track_id && <button onClick={()=>void action(()=>onOpen(job.track_id!))}>Open track<ChevronRight size={14}/></button>}
-    </div>
-    {active && <div className="download-progress"><progress aria-label={`Download progress ${job.title}`} {...(job.total_bytes && job.total_bytes>0?{max:job.total_bytes,value:Math.min(job.downloaded_bytes,job.total_bytes)}:{})}/><small>{bytes(job.downloaded_bytes)}{job.total_bytes!=null?` / ${bytes(job.total_bytes)}`:''}</small></div>}
-    {job.error && <p className="metadata-error" role="alert">{job.error}</p>}
-    {quality && <p className="download-quality">{quality.container.toUpperCase()}{quality.codec!==quality.container?` · ${quality.codec.toUpperCase()}`:''}{quality.bit_rate?` · ${Math.round(quality.bit_rate/1000)} kbps`:''}{quality.sample_rate?` · ${quality.sample_rate/1000} kHz`:''}{quality.channels?` · ${quality.channels===2?'Stereo':quality.channels===1?'Mono':`${quality.channels} channels`}`:''} · {duration(quality.duration)} · {bytes(quality.bytes)} · Original source{job.duplicate?' · Existing track kept':''}</p>}
-    <Disclosure className="download-provenance" label={<> Source &amp; file </>}><label>Source<input readOnly value={job.source_url} onClick={e=>e.currentTarget.select()}/></label>{quality?.resolved_url!==job.source_url && quality?.resolved_url && <label>Resolved URL<input readOnly value={quality.resolved_url} onClick={e=>e.currentTarget.select()}/></label>}{job.path && <label>Saved file<input readOnly value={job.path} onClick={e=>e.currentTarget.select()}/></label>}{quality && <small>Downloaded SHA-256 <code>{quality.sha256}</code></small>}{quality?.reference_url && <label>Chosen reference<input readOnly value={quality.reference_url} onClick={e=>e.currentTarget.select()}/></label>}</Disclosure>
-   </article>;
-  })}</div>}
-  {capabilities && <Disclosure className="provider-capabilities" label={<> Supported sources </>}><dl>{capabilities.providers.map(provider=><div key={provider.id}><dt>{provider.name}</dt><dd>{provider.acquisition?'Audio download available':provider.metadata?'References only':'Unavailable'}<small>{provider.authentication}</small></dd></div>)}</dl><p>Downloads folder: {capabilities.download_directory}</p><p>512 MB per file. Spotify and SoundCloud links are references.</p></Disclosure>}
+  <div className="download-queue-head"><h2>Downloads</h2></div>
+  {queueError && <Notice action={<button type="button" onClick={()=>void onRefresh().catch(()=>{})}>Try again</button>}>The download list could not be updated. {errorText(queueError)}</Notice>}
+  {listError && <Notice onDismiss={()=>setListError('')}>{listError}</Notice>}
+  {jobs.length===0?<p className="discovery-help">Nothing downloaded yet. Downloads appear here and in your library.</p>:<div className="download-queue">
+   {group('In progress',<LoaderCircle size={13} className="spin" aria-hidden="true"/>,active)}
+   {group('Did not finish',<AlertTriangle size={13} aria-hidden="true"/>,unfinished,<button type="button" disabled={clearing} title="Remove failed, cancelled and interrupted downloads from this list. Retrying one later shows it again." onClick={()=>void clearFailed()}>Clear failed</button>)}
+   {group('Completed',<Check size={13} aria-hidden="true"/>,completed)}
+  </div>}
+  {capabilities && <Disclosure className="provider-capabilities" label="What can be downloaded"><dl>{capabilities.providers.map(provider=><div key={provider.id}><dt>{provider.name}</dt><dd>{provider.acquisition?`Audio can be downloaded${provider.formats.length?` (${provider.formats.join(', ')})`:''}`:provider.metadata || provider.search?'Reference only: identifies a track, no audio is downloaded':'Not available'}</dd></div>)}</dl><p>Downloads are saved in {capabilities.download_directory}</p><p>Files up to {limit} can be downloaded. Audio is kept as published; nothing is converted.</p></Disclosure>}
  </section>;
 }

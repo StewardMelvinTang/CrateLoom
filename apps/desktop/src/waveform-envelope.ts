@@ -43,3 +43,18 @@ export class PlaybackClock {
     return this.visual;
   }
 }
+
+/**
+ * Decode the packed min/max waveform signal (base64, little-endian 16-bit pairs).
+ * Damaged data returns null instead of throwing, so the caller can fall back to coarse peaks:
+ * an odd byte count cannot be viewed as 16-bit samples, and an unpaired sample has no partner.
+ */
+export function decodeSignal(encoded: unknown): Int16Array | null {
+  if (typeof encoded !== 'string' || !encoded) return null;
+  try {
+    const bytes = Uint8Array.from(atob(encoded), c => c.charCodeAt(0));
+    const samples = new Int16Array(bytes.buffer, 0, bytes.length >> 1);
+    const paired = samples.length % 2 ? samples.subarray(0, samples.length - 1) : samples;
+    return paired.length ? paired : null;
+  } catch { return null; }
+}

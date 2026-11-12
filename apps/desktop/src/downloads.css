@@ -1,0 +1,14 @@
+/* Downloads popover and the shared download failure line. Loaded after the global sheets. */
+.downloads-popover { width: min(420px, calc(100vw - 32px)); max-height: min(70vh, 600px); }
+.downloads-heading button:not(.icon) { font-size: 12px; }
+.downloads-groups { overflow: auto; min-height: 0; }
+.downloads-group h3 { display: flex; align-items: center; gap: 6px; margin: 0; padding: 10px 12px 4px; font-size: 11px; font-weight: 600; color: var(--muted); }
+.downloads-group + .downloads-group { border-top: 1px solid var(--line); }
+.downloads-group .downloads-list { overflow: visible; }
+.download-summary button:not(.icon) { flex: none; font-size: 11px; padding: 5px 8px; gap: 4px; }
+.download-summary small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
+.download-empty { font-size: 12px; line-height: 1.5; }
+.download-problem { margin-top: 6px; font-size: 12px; min-width: 0; }
+.download-problem > p { margin: 0; color: var(--text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.download-problem .disclosure-toggle { font-size: 11px; padding: 3px 0; }
+.download-problem code { display: block; padding: 2px 0 4px; font-size: 11px; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }
