@@ -53,11 +53,12 @@ def edit(path,fields,artwork,write_artwork):
         for key,value in fields.items():
             if str(read.get(keys[key],[''])[0])!=value:raise ValueError('Tag read-back failed: '+key)
     elif isinstance(audio,FLAC) or audio.__class__.__name__ in ('OggVorbis','OggOpus'):
+        # Ogg covers are not embedded; the text tags are still written.
+        if not isinstance(audio,FLAC):write_artwork=False
         for key,value in fields.items():
             if value:audio[key]=[value]
             else:audio.tags.pop(key,None)
         if write_artwork:
-            if not isinstance(audio,FLAC):raise ValueError('Cover writing currently supports MP3, AIFF, WAV, FLAC and M4A')
             keep=[p for p in audio.pictures if p.type!=3];audio.clear_pictures()
             for pic in keep:audio.add_picture(pic)
             if image:
@@ -73,6 +74,7 @@ def edit(path,fields,artwork,write_artwork):
         elif isinstance(read,FLAC):images=[pic.data for pic in read.pictures if pic.type==3]
         else:images=[]
         if images!=([image] if image else []):raise ValueError('Artwork read-back failed; original kept')
+    return write_artwork
 
 def run(recipe):
     source=Path(recipe['path']);expected=recipe['expected_hash']
@@ -82,7 +84,7 @@ def run(recipe):
     original=identity(source)
     fd,name=tempfile.mkstemp(prefix='.crateloom-tags-',suffix=source.suffix,dir=source.parent);os.close(fd);temporary=Path(name)
     try:
-        shutil.copy2(source,temporary);edit(temporary,recipe['fields'],recipe.get('artwork_path'),recipe.get('write_artwork',False))
+        shutil.copy2(source,temporary);embedded=edit(temporary,recipe['fields'],recipe.get('artwork_path'),recipe.get('write_artwork',False))
         verified=identity(temporary)
         if verified[:3]!=original[:3] or abs(verified[3]-original[3])>.001:raise ValueError('Tag edit changed audio identity or timing; original kept')
         if digest(source)!=expected:raise ValueError('File changed during tag writing; original kept')
@@ -93,7 +95,7 @@ def run(recipe):
             with path.open('rb') as f:os.fsync(f.fileno())
         if digest(source)!=expected:raise ValueError('File changed before replacement; original kept')
         new_hash=digest(temporary);os.replace(temporary,source)
-        return {'file_hash':new_hash,'backup':str(backup)}
+        return {'file_hash':new_hash,'backup':str(backup),'artwork_embedded':bool(embedded)}
     finally:temporary.unlink(missing_ok=True)
 
 if __name__=='__main__':

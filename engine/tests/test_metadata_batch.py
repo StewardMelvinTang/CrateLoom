@@ -8,6 +8,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
+import urllib.request
 
 from crateloom import __main__ as api, metadata_batch, metadata_lookup, preparation
 
@@ -180,6 +181,79 @@ class MetadataBatch(unittest.TestCase):
             path = preparation.fetch_cover(api,{'provider':'Apple Music','recording_id':'123'},'https://is1-ssl.mzstatic.com/image/100x100bb.jpg')
         self.assertEqual(Path(path).read_bytes(),image)
         self.assertIn('600x600bb',remote.call_args.args[0])
+
+    def fresh(self, name):
+        audio = self.root/name
+        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i',f'sine=frequency={500+len(name)*10}:duration=2','-metadata','title=Song','-metadata','artist=Artist','-y',str(audio)], check=True)
+        track = api.dispatch('library.import', {'path': str(audio)})
+        self.assertIsNone(track['metadata'])
+        return track
+
+    def test_opening_metadata_during_a_batch_does_not_skip_the_track(self):
+        track = self.fresh('fresh.wav')
+        opened = []
+        def search(*args,**kwargs):
+            # The editor reads this track between batch start and the final write.
+            opened.append(api.dispatch('metadata.get',{'id':track['id']}))
+            return {'candidates':[candidate('Catalog title')]}
+        with patch.object(metadata_lookup,'search',side_effect=search),patch.object(preparation,'fetch_cover',return_value=str(self.cover)):
+            batch = self.finish(self.start([track]))
+        self.assertEqual(len(opened),1)
+        self.assertEqual((batch['applied'],batch['skipped']),(1,0),batch)
+        self.assertEqual(api.dispatch('track.get',{'id':track['id']})['title'],'Catalog title')
+
+    def test_fingerprint_ignores_the_stored_baseline_but_not_staged_edits(self):
+        track = self.fresh('baseline.wav')
+        before = metadata_batch.fingerprint(track)
+        api.dispatch('metadata.get',{'id':track['id']})
+        stored = api.dispatch('track.get',{'id':track['id']})
+        self.assertIsNotNone(stored['metadata'])
+        self.assertEqual(metadata_batch.fingerprint(stored),before)
+        api.dispatch('metadata.save',{'id':track['id'],'values':{'title':'Song','artist':'Artist'}})
+        self.assertEqual(metadata_batch.fingerprint(api.dispatch('track.get',{'id':track['id']})),before)
+        api.dispatch('metadata.save',{'id':track['id'],'values':{'album':'Mine'}})
+        edited = metadata_batch.fingerprint(api.dispatch('track.get',{'id':track['id']}))
+        self.assertNotEqual(edited,before)
+        api.dispatch('metadata.save',{'id':track['id'],'values':{},'artwork_path':str(self.cover)})
+        self.assertNotEqual(metadata_batch.fingerprint(api.dispatch('track.get',{'id':track['id']})),edited)
+
+    def test_unusable_catalog_date_is_dropped_instead_of_failing_the_track(self):
+        track = self.track()
+        odd = candidate()
+        odd['values']['date'] = 'circa 2001'
+        with patch.object(metadata_lookup,'search',return_value={'candidates':[odd]}),patch.object(preparation,'fetch_cover',return_value=str(self.cover)):
+            batch = self.finish(self.start([track]))
+        self.assertEqual(batch['applied'],1,batch)
+        self.assertNotIn('date',api.dispatch('track.get',{'id':track['id']})['metadata']['pending'])
+
+    def test_invalid_cached_cover_is_downloaded_again_once(self):
+        image = self.cover.read_bytes()
+        url = 'https://is1-ssl.mzstatic.com/image/100x100bb.jpg'
+        release = '788cb31f-de60-4339-9152-f3edeef9f966'
+        for source,name in [({'provider':'Apple Music','recording_id':'77'},'apple-77.image'),({'release_id':release},'release-'+release+'-1200.image')]:
+            with self.subTest(name=name):
+                cached = self.root/'artwork'/name
+                cached.write_bytes(b'truncated download')
+                with patch.object(preparation,'request',return_value=image) as remote:
+                    path = preparation.fetch_cover(api,source,url)
+                    self.assertEqual(Path(path).read_bytes(),image)
+                    self.assertEqual(cached.read_bytes(),image)
+                    preparation.fetch_cover(api,source,url)
+                    self.assertEqual(remote.call_count,1)
+                cached.write_bytes(b'truncated download')
+                with patch.object(preparation,'request',return_value=b'still not an image') as remote,self.assertRaises(ValueError):
+                    preparation.fetch_cover(api,source,url)
+                self.assertEqual(remote.call_count,1)
+
+    def test_insecure_redirect_is_refused_before_it_is_followed(self):
+        handler = preparation.SecureRedirects()
+        original = urllib.request.Request('https://coverartarchive.org/release/x/front-1200')
+        with self.assertRaisesRegex(ValueError,'Insecure provider redirect'):
+            handler.redirect_request(original,None,307,'Temporary Redirect',{},'http://mirror.example/cover.jpg')
+        followed = handler.redirect_request(original,None,302,'Found',{},'https://mirror.example/cover.jpg')
+        self.assertEqual(followed.full_url,'https://mirror.example/cover.jpg')
+        redirects = [h for h in preparation.OPENER.handlers if isinstance(h,urllib.request.HTTPRedirectHandler)]
+        self.assertEqual([type(h) for h in redirects],[preparation.SecureRedirects])
 
 
 if __name__=='__main__':unittest.main()

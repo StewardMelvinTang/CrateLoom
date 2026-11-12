@@ -14,7 +14,10 @@ import tempfile
 import threading
 import time
 import uuid
-from .structure_worker import MAX_DURATION as MAX_STRUCTURE_DURATION, MAX_SECTIONS
+# The worker modules keep heavy imports inside run(), so the host can share
+# their version constants instead of repeating them.
+from .analysis_worker import VERSION as ANALYSIS_VERSION
+from .structure_worker import MAX_DURATION as MAX_STRUCTURE_DURATION, MAX_SECTIONS, VERSION as STRUCTURE_VERSION
 from .fast_sections import VERSION as FAST_STRUCTURE_VERSION
 
 VERSION = '0.1.0'
@@ -23,8 +26,6 @@ ROOT.mkdir(parents=True, exist_ok=True)
 DB = ROOT / 'library.sqlite3'
 CACHE = ROOT / 'analysis-cache'
 CACHE.mkdir(parents=True, exist_ok=True)
-ANALYSIS_VERSION = 'librosa-0.11.0-rgb-5'
-STRUCTURE_VERSION = 'allin1-infer-566f96c3-harmonix-all-v1'
 WORKERS = {}
 IMPORT_CONTEXT=threading.local()
 
@@ -148,8 +149,11 @@ def verify_asset(db, t):
         # cannot safely be classified as tags-only.
         if not t['audio_hash']:
             raise ValueError('The file changed since import. Restore the original before editing or exporting cues.')
-        duration, stream, _ = probe(path)
-        if (audio_hash(path) != t['audio_hash'] or stream.get('codec_name') != t['codec']
+        try:
+            duration, stream, _ = probe(path); signature = audio_hash(path)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            raise ValueError('The file changed since import and can no longer be read as audio. Restore the original before editing or exporting cues.') from error
+        if (signature != t['audio_hash'] or stream.get('codec_name') != t['codec']
                 or int(stream.get('sample_rate') or 0) != int(t['sample_rate'] or 0)
                 or abs(duration - t['duration']) > .001):
             raise ValueError('The audio changed since import. Restore the original before editing or exporting cues.')
@@ -336,11 +340,16 @@ def job_status(db, job_id):
     job = dict(row)
     if job['state'] in ('queued', 'running'):
         proc = WORKERS.get(job_id)
+        # Sample the worker once, and before its status file: a worker that
+        # exits between two checks must not be read as a crash.
+        exited = proc is not None and proc.poll() is not None
         status_file = Path(job['status_path'])
-        status = json.loads(status_file.read_text()) if status_file.is_file() else {'state': 'running', 'stage': 'Starting'}
-        if status.get('state') == 'succeeded' and proc and proc.poll() is None:
+        try: status = json.loads(status_file.read_text()) if status_file.is_file() else None
+        except (OSError, ValueError): status = None
+        if not isinstance(status, dict): status = {'state': 'running', 'stage': 'Starting'}
+        if status.get('state') == 'succeeded' and proc and not exited:
             status = {'state': 'running', 'stage': 'Finishing'}
-        if status.get('state') == 'succeeded' and proc and proc.poll() is not None:
+        if status.get('state') == 'succeeded' and exited:
             if proc.returncode != 0: status = {'state': 'failed', 'stage': 'Failed', 'error': 'Analysis worker exited unexpectedly'}
             else:
                 try:
@@ -355,7 +364,7 @@ def job_status(db, job_id):
                 except Exception as e: status = {'state': 'failed', 'stage': 'Failed', 'error': str(e)}
         elif proc is None:
             status = {'state': 'failed', 'stage': 'Interrupted', 'error': 'Analysis was interrupted; start it again.'}
-        elif proc.poll() is not None and status.get('state') not in ('succeeded', 'failed'):
+        elif exited and status.get('state') not in ('succeeded', 'failed'):
             status = {'state': 'failed', 'stage': 'Failed', 'error': 'Analysis worker exited unexpectedly'}
         state = status.get('state', 'running'); stage = status.get('stage', 'Working'); error = status.get('error')
         db.execute('UPDATE jobs SET state=?,stage=?,error=? WHERE id=?', (state,stage,error,job_id))
@@ -367,6 +376,9 @@ def job_status(db, job_id):
                 except subprocess.TimeoutExpired: stop_worker(finished)
             if state == 'failed': Path(job['output_path']).unlink(missing_ok=True)
             shutil.rmtree(job['output_path']+'.work',ignore_errors=True)
+            # The jobs table is now the record of the outcome; drop the worker's
+            # status file once that record is durable.
+            db.commit(); Path(job['status_path']).unlink(missing_ok=True)
     return {key: job[key] for key in ('id','track_id','state','stage','error','kind')}
 
 def cache_key(t, kind='beat', fast=False):
@@ -407,13 +419,36 @@ def dispatch(method, p):
         if method == 'library.list': return [track(db,r['id']) for r in db.execute('SELECT id FROM tracks ORDER BY rowid DESC').fetchall()]
         if method == 'library.import':
             result,duplicate=import_track(db,p['path']);return dict(result,duplicate=duplicate)
+        if method == 'library.remove':
+            # Library records only: the audio file on disk is never touched, and
+            # derived caches (analysis, artwork, playback) are left in place.
+            ids=p.get('ids')
+            if not isinstance(ids,list) or not 1<=len(ids)<=5000 or any(not isinstance(i,str) for i in ids): raise ValueError('Choose 1–5,000 library tracks to remove')
+            chosen=set(ids)
+            for row in db.execute("SELECT id,track_id FROM jobs WHERE state IN ('queued','running')").fetchall():
+                # Settle a worker that already finished; only live analysis blocks removal.
+                if row['track_id'] in chosen and job_status(db,row['id'])['state'] in ('queued','running'):
+                    raise ValueError('Analysis is still running for a selected track. Wait for it to finish or cancel it before removing the track.')
+            keys=[(i,) for i in dict.fromkeys(ids) if db.execute('SELECT 1 FROM tracks WHERE id=?',(i,)).fetchone()]
+            for statement in ('DELETE FROM cues WHERE track_id=?','DELETE FROM sections WHERE track_id=?','DELETE FROM playlist_tracks WHERE track_id=?','DELETE FROM jobs WHERE track_id=?',
+                              # A finished download of the removed track would keep its set entry locked.
+                              "UPDATE dj_set_items SET download_id=NULL WHERE track_id=? AND download_id IN (SELECT id FROM acquisitions WHERE state='completed')",
+                              'UPDATE dj_set_items SET track_id=NULL,cue_pending=0 WHERE track_id=?',
+                              'UPDATE acquisitions SET track_id=NULL WHERE track_id=?','UPDATE library_import_items SET track_id=NULL WHERE track_id=?',
+                              'DELETE FROM tracks WHERE id=?'):
+                db.executemany(statement,keys)
+            return {'removed':len(keys)}
         if method == 'track.relink':
             t=track(db,p['id'])
             if not t['missing']: raise ValueError('Only missing tracks can be relinked')
             path=Path(p['path']).expanduser().resolve(strict=True)
+            if not path.is_file(): raise ValueError('Choose an audio file')
             if db.execute('SELECT 1 FROM tracks WHERE path=? AND id!=?',(str(path),t['id'])).fetchone(): raise ValueError('That path already belongs to another library track')
-            digest=file_hash(path);duration,stream,_=probe(path)
-            matches=digest==t['file_hash'] if not t['audio_hash'] else audio_hash(path)==t['audio_hash']
+            try:
+                digest=file_hash(path);duration,stream,_=probe(path)
+                matches=digest==t['file_hash'] if not t['audio_hash'] else audio_hash(path)==t['audio_hash']
+            except (subprocess.CalledProcessError,subprocess.TimeoutExpired) as error:
+                raise ValueError('Cannot read audio. The file may be damaged or unsupported.') from error
             if not matches or stream.get('codec_name')!=t['codec'] or int(stream.get('sample_rate') or 0)!=int(t['sample_rate'] or 0) or abs(duration-t['duration'])>.001: raise ValueError('The selected file does not match the original audio. Cues were kept unchanged.')
             db.execute('UPDATE tracks SET path=?,file_hash=? WHERE id=?',(str(path),digest,t['id']))
             return track(db,t['id'])
@@ -465,7 +500,7 @@ def dispatch(method, p):
                     return job_status(db,job_id)
                 except (OSError,ValueError,KeyError,json.JSONDecodeError): pass
             if not python or not Path(python).is_file():
-                raise ValueError('Structure model unavailable. Run scripts/setup-structure-macos.sh and restart the app.' if kind=='structure' else 'Beat analysis is unavailable. Run scripts/setup-analysis-macos.sh and restart the app.')
+                raise ValueError('Fast section estimates are unavailable: no Python 3 interpreter was found. Install Python 3 or run scripts/setup-analysis-macos.sh, then restart the app.' if fast else 'Structure model unavailable. Run scripts/setup-structure-macos.sh and restart the app.' if kind=='structure' else 'Beat analysis is unavailable. Run scripts/setup-analysis-macos.sh and restart the app.')
             env=os.environ.copy(); env['PYTHONPATH']=str(Path(__file__).resolve().parent.parent)
             if fast and asset['detail_analysis']:
                 env['CRATELOOM_FAST_BEAT_CACHE'] = asset['detail_analysis']['cache_path']
@@ -619,6 +654,10 @@ def main():
             out={'protocol_version':1,'request_id':req['request_id'],'result':dispatch(req['method'],req['params'])}
         except Exception as e:
             out={'protocol_version':1,'request_id':req.get('request_id'),'error':{'code':'engine_error','message':str(e)}}
-        print(json.dumps(out,ensure_ascii=False),flush=True)
+        # A reply that cannot be written must not end the request loop.
+        try: text=json.dumps(out,ensure_ascii=False); text.encode(sys.stdout.encoding or 'utf-8')
+        except UnicodeError: text=json.dumps(out)
+        except (TypeError,ValueError): text=json.dumps({'protocol_version':1,'request_id':out['request_id'],'error':{'code':'engine_error','message':'The engine produced a response that could not be encoded.'}})
+        print(text,flush=True)
         if req.get('method') == 'system.shutdown' and 'error' not in out: break
 if __name__ == '__main__': main()

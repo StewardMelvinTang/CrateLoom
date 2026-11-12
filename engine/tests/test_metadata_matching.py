@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from crateloom.metadata_matching import clean_name, search_identity, catalog_identity, query_plan, rank_candidates
+from crateloom.metadata_matching import clean_name, search_identity, catalog_identity, query_plan, rank_candidates, split_version, primary_artist
 from crateloom import preparation, metadata_lookup
 
 
@@ -207,6 +207,49 @@ class MetadataMatching(unittest.TestCase):
                     time.sleep(.01); job = preparation.dispatch(api, None, 'metadata.job', {'id': job['id']})
                 self.assertEqual(job['state'], 'completed')
                 self.assertTrue(remote.call_args[0][0].endswith('/front-1200'))
+
+    def test_titles_ending_in_a_version_word_are_not_split_without_a_delimiter(self):
+        for title in ('In Da Club', 'Born to Live', 'The Original', 'Video Killed the Radio', 'Live', 'Radio', 'Going Acoustic', 'Artist - Live Forever'):
+            with self.subTest(title=title): self.assertEqual(split_version(title), (title, ''))
+        self.assertEqual(search_identity('50 Cent - In Da Club'), {'title': 'In Da Club', 'artist': '50 Cent', 'version': ''})
+        self.assertEqual(search_identity('In Da Club', '50 Cent'), {'title': 'In Da Club', 'artist': '50 Cent', 'version': ''})
+        ranked = rank_candidates({'recordings': [recording('club', 'In Da Club', '50 Cent', 193)]}, 193, search_identity('In Da Club', '50 Cent'))
+        self.assertEqual(ranked[0]['match_status'], 'strong')
+
+    def test_delimited_or_phrased_versions_are_still_split(self):
+        cases = {
+            'Song (Live)': ('Song', 'Live'), 'Song [Extended Mix]': ('Song', 'Extended Mix'),
+            'Song - Live': ('Song', 'Live'), 'Song - Radio Edit': ('Song', 'Radio Edit'), 'Song – Club': ('Song', 'Club'),
+            'Song - 2011 Remaster': ('Song', '2011 Remaster'), 'Song - Remastered 2011': ('Song', 'Remastered 2011'),
+            'Song Extended Mix': ('Song', 'Extended Mix'), 'Song Radio Edit': ('Song', 'Radio Edit'), 'Song Club Mix': ('Song', 'Club Mix'),
+            'Song Original Mix': ('Song', 'Original Mix'), 'Song Live Version': ('Song', 'Live Version'), 'Song Instrumental': ('Song', 'Instrumental'),
+            'In Da Club (Club Mix)': ('In Da Club', 'Club Mix'),
+        }
+        for title, expected in cases.items():
+            with self.subTest(title=title): self.assertEqual(split_version(title), expected)
+        self.assertEqual(search_identity('Song - Live', 'Artist'), {'title': 'Song', 'artist': 'Artist', 'version': 'Live'})
+
+    def test_remixer_phrase_keeps_its_word_order(self):
+        plan = query_plan(search_identity('Low (Travis Barker Remix)', 'Flo Rida'), 230)
+        self.assertIn('recording:"travis barker" OR comment:"travis barker"', plan[0])
+        repeated = query_plan({'title': 'Song', 'artist': '', 'version': 'Zed Remix / Zed Alpha Remix'}, None)
+        self.assertIn('recording:"zed alpha"', repeated[0])
+
+    def test_primary_artist_keeps_names_that_contain_a_comma_before_the(self):
+        cases = {
+            'Tyler, The Creator': 'Tyler, The Creator', 'Tyler, The Creator, Kali Uchis': 'Tyler, The Creator',
+            'Tyler, The Creator feat. Kali Uchis': 'Tyler, The Creator', 'Tyler, The Creator; Kali Uchis': 'Tyler, The Creator',
+            'Flo Rida,T-Pain': 'Flo Rida', 'Flo Rida, T-Pain & Sia': 'Flo Rida', 'Calvin Harris, The Chemical Brothers': 'Calvin Harris',
+            'Artist, Theo Parrish': 'Artist', 'Drake; Future': 'Drake', 'Flo Rida ft. T-Pain': 'Flo Rida',
+            # Unchanged: serial-comma band names still reduce to their first word for retrieval only.
+            'Earth, Wind & Fire': 'Earth',
+        }
+        for credit, expected in cases.items():
+            with self.subTest(credit=credit): self.assertEqual(primary_artist(credit), expected)
+        self.assertIn('artist:"Tyler, The Creator"', query_plan(catalog_identity('EARFQUAKE', 'Tyler, The Creator'), 190)[0])
+        # The full credit still scores a band name correctly even though retrieval uses its first word.
+        ranked = rank_candidates({'recordings': [recording('ewf', 'September', 'Earth, Wind & Fire', 215)]}, 215, search_identity('September', 'Earth, Wind & Fire'))
+        self.assertEqual(ranked[0]['match_status'], 'strong')
 
 
 if __name__ == '__main__': unittest.main()

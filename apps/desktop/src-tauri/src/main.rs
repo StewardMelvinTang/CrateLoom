@@ -61,6 +61,8 @@ async fn engine_call(
         "library.list",
         "playlists.list",
         "playlists.save",
+        "playlists.delete",
+        "library.remove",
         "metadata.get",
         "metadata.reload",
         "metadata.save",

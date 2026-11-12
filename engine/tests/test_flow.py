@@ -63,6 +63,20 @@ class Flow(unittest.TestCase):
                 p.stdout.close()
                 p.stderr.close()
 
+    def test_unencodable_reply_does_not_stop_the_request_loop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, 'CRATELOOM_DATA': str(Path(tmp) / 'data'),
+                   'PYTHONPATH': str(Path(__file__).resolve().parents[1])}
+            # A lone surrogate is valid JSON input but cannot be written as UTF-8.
+            lines = ['{"protocol_version":1,"request_id":"\\ud800","method":"handshake","params":{}}',
+                     '{"protocol_version":1,"request_id":"next","method":"handshake","params":{}}']
+            done = subprocess.run([sys.executable, '-m', 'crateloom'], input='\n'.join(lines) + '\n',
+                                  text=True, capture_output=True, env=env, timeout=30)
+            replies = [json.loads(line) for line in done.stdout.splitlines()]
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual([reply['request_id'] for reply in replies], ['\ud800', 'next'])
+            self.assertEqual(replies[1]['result']['version'], '0.1.0')
+
     def test_changed_audio_cannot_reuse_cues_or_export(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); audio = root / 'source.wav'

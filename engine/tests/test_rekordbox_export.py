@@ -3,9 +3,11 @@ import errno
 import hashlib
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import sqlite3
 import subprocess
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.parse import unquote, urlsplit
@@ -111,6 +113,61 @@ class PlaylistExport(unittest.TestCase):
         track=ET.parse(dest).find('./COLLECTION/TRACK')
         self.assertEqual(Path(unquote(urlsplit(track.get('Location')).path)),self.sources[0])
         self.assertIsNone(json.loads(Path(result['manifest']).read_text())['tracks'][0]['relative_audio'])
+
+    def test_copy_phase_does_not_hold_the_library_write_lock(self):
+        # A track from schema version 1 gets its audio signature recorded during verification.
+        with api.connect() as db:
+            db.execute('UPDATE tracks SET audio_hash=NULL WHERE id=?',(self.ids[0],))
+        copy=exporter.shutil.copyfile
+        writes=[]
+        def copying(source,target):
+            other=sqlite3.connect(api.DB,timeout=.2)
+            try:
+                other.execute('UPDATE playlists SET name=name')
+                other.commit()
+                writes.append(Path(source).name)
+            finally:
+                other.close()
+            return copy(source,target)
+        for method in ('export.rekordbox','export.enqueue'):
+            with self.subTest(method=method),patch.object(exporter.shutil,'copyfile',side_effect=copying):
+                task=api.dispatch(method,{'track_ids':self.ids,'path':str(self.root/(method+'.xml')),'copy_audio':True})
+                deadline=time.monotonic()+5
+                while method=='export.enqueue' and task['state']=='running' and time.monotonic()<deadline:
+                    time.sleep(.03)
+                    task=api.dispatch('metadata.job',{'id':task['id']})
+                self.assertIsNone(task.get('error'),task)
+        self.assertEqual(len(writes),4)
+        self.assertIsNotNone(api.dispatch('track.get',{'id':self.ids[0]})['audio_hash'])
+
+    def test_free_space_check_covers_volumes_without_hard_links(self):
+        sizes=[source.stat().st_size for source in self.sources]
+        free=lambda amount:patch.object(exporter.shutil,'disk_usage',return_value=SimpleNamespace(free=amount))
+        fat=patch.object(exporter.os,'link',side_effect=OSError(errno.ENOTSUP,'hard links unavailable'))
+        self.assertTrue(exporter.links_supported(self.root))
+        with fat:
+            self.assertFalse(exporter.links_supported(self.root))
+        with free(sum(sizes)-1),self.assertRaisesRegex(ValueError,'free space'):
+            api.dispatch('export.rekordbox',{'track_ids':self.ids,'path':str(self.root/'Short.xml'),'copy_audio':True})
+        with free(sum(sizes)):
+            api.dispatch('export.rekordbox',{'track_ids':self.ids,'path':str(self.root/'Linked.xml'),'copy_audio':True})
+        # A staged file is copied again when it cannot be linked, so the largest one must fit twice.
+        with fat,free(sum(sizes)+max(sizes)-1),self.assertRaisesRegex(ValueError,'free space'):
+            api.dispatch('export.rekordbox',{'track_ids':self.ids,'path':str(self.root/'Tight.xml'),'copy_audio':True})
+        self.assertFalse(list(self.root.glob('Short*'))+list(self.root.glob('Tight*')))
+        staged=[]
+        publish=exporter.publish
+        def watching(source,target,created):
+            staged.append(sum(path.stat().st_size for path in Path(source).parent.glob('*.wav')))
+            publish(source,target,created)
+        with fat,free(sum(sizes)+max(sizes)),patch.object(exporter,'publish',side_effect=watching):
+            result=api.dispatch('export.rekordbox',{'track_ids':self.ids,'path':str(self.root/'Copied.xml'),'copy_audio':True})
+        # Each staged copy is released as soon as it is published.
+        self.assertEqual(staged[:2],[sum(sizes),sizes[1]])
+        copies=sorted(Path(result['audio_directory']).iterdir())
+        self.assertEqual([path.read_bytes() for path in copies],[source.read_bytes() for source in self.sources])
+        self.assertFalse(list(self.root.glob('.crateloom-export-*')))
+        self.assertTrue(all(source.exists() for source in self.sources))
 
     def test_file_url_posix_drive_and_unc(self):
         self.assertEqual(exporter.location(PurePosixPath('/音 & #.wav')),'file://localhost/%E9%9F%B3%20%26%20%23.wav')

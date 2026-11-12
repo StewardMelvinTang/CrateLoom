@@ -83,6 +83,18 @@ def publish(source, dest, created):
             os.fsync(output.fileno())
 
 
+def links_supported(folder):
+    """Whether staged files can be hard-linked into place (not on FAT or exFAT)."""
+    try:
+        with tempfile.TemporaryDirectory(prefix='.crateloom-export-',dir=folder) as temp:
+            probe = Path(temp)/'probe'
+            probe.touch()
+            os.link(probe,Path(temp)/'link')
+        return True
+    except OSError:
+        return False
+
+
 def export(api,db,params):
     selectors = [key for key in ('id','track_ids','playlist_id') if key in params]
     if len(selectors)!=1:
@@ -123,8 +135,16 @@ def export(api,db,params):
             raise ValueError(f'{track["title"]}: {error}') from error
         tracks.append(api.track(db,tid))
         originals.append(source)
-    if copy and shutil.disk_usage(dest.parent).free < sum(p.stat().st_size for p in originals):
-        raise ValueError('There is not enough free space for the audio copies')
+    # verify_asset may have refreshed a stored hash. Finish that write
+    # transaction before the long copy so other writers are not locked out.
+    db.commit()
+    if copy:
+        sizes = [p.stat().st_size for p in originals]
+        # Without hard links each staged file is copied once more when it is
+        # published and only then removed, so the largest one is on disk twice.
+        needed = sum(sizes)+(0 if links_supported(dest.parent) else max(sizes))
+        if shutil.disk_usage(dest.parent).free < needed:
+            raise ValueError('There is not enough free space for the audio copies')
     created = []
     made_audio_dir = False
     with tempfile.TemporaryDirectory(prefix='.crateloom-export-',dir=dest.parent) as temp:
@@ -164,6 +184,9 @@ def export(api,db,params):
                 made_audio_dir = True
                 for path in paths:
                     publish(stage/path.name,path,created)
+                    # Release the staged copy now; on volumes without hard
+                    # links it would otherwise double the space in use.
+                    (stage/path.name).unlink()
             for source,target in staged_outputs:
                 publish(source,target,created)
         except BaseException:

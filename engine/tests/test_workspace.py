@@ -1,7 +1,9 @@
 from contextlib import ExitStack
 import json
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -9,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from crateloom import __main__ as api
-from crateloom import fast_sections, playback, preparation, set_artwork, set_import
+from crateloom import analysis_worker, fast_sections, playback, preparation, set_artwork, set_import, structure_worker
 
 
 class Workspace(unittest.TestCase):
@@ -195,3 +197,132 @@ class Workspace(unittest.TestCase):
         self.assertEqual(result[0]['start_us'], 0)
         self.assertEqual(result[-1]['end_us'], 96000000)
         self.assertTrue(all(a['end_us'] == b['start_us'] for a, b in zip(result, result[1:])))
+
+    def poll(self, job):
+        deadline = time.monotonic() + 8
+        while job['state'] == 'running' and time.monotonic() < deadline:
+            time.sleep(.02)
+            job = api.dispatch('jobs.get', {'id': job['id']})
+        return job
+
+    def test_fast_sections_without_an_interpreter_reports_its_own_reason(self):
+        track = self.audio('nopython.wav')
+        with patch.object(api.sys, 'frozen', True, create=True), patch.dict(api.os.environ), patch.object(api.shutil, 'which', return_value=None):
+            api.os.environ.pop('CRATELOOM_ANALYSIS_PYTHON', None)
+            with self.assertRaisesRegex(ValueError, 'Fast section estimates are unavailable') as raised:
+                api.dispatch('structure.enqueue', {'id': track['id'], 'mode': 'fast'})
+            self.assertIsNone(api.dispatch('structure.enqueue', {'id': track['id'], 'mode': 'fast', 'automatic': True}))
+        self.assertNotIn('Structure model', str(raised.exception))
+
+    def test_finished_jobs_leave_no_status_file_and_stay_readable(self):
+        self.assertEqual((api.ANALYSIS_VERSION, api.STRUCTURE_VERSION), (analysis_worker.VERSION, structure_worker.VERSION))
+        track = self.audio('status.wav', 12)
+        job = self.poll(api.dispatch('structure.enqueue', {'id': track['id'], 'mode': 'fast'}))
+        self.assertEqual(job['state'], 'succeeded', job)
+        self.assertEqual(list(api.CACHE.glob('*.status.json')), [])
+        self.assertEqual(api.dispatch('jobs.get', {'id': job['id']}), job)
+        self.assertEqual(api.dispatch('structure.enqueue', {'id': track['id'], 'mode': 'fast'})['stage'], 'Using cached analysis')
+
+    def test_unreadable_status_file_does_not_break_job_polling(self):
+        track = self.audio('stuck.wav')
+        status = api.CACHE / 'stuck.status.json'
+        status.write_text('{"state": "runn')
+        worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'], start_new_session=True)
+        self.addCleanup(api.stop_worker, worker)
+        with patch.dict(api.WORKERS, {'stuck': worker}):
+            with api.connect() as db:
+                db.execute("INSERT INTO jobs (id,track_id,state,stage,status_path,output_path,cache_path,cache_key,error,kind) VALUES ('stuck',?,'running','Starting',?,?,?,'key',NULL,'beat')",
+                           (track['id'], str(status), str(api.CACHE / 'stuck.partial.json'), str(api.CACHE / 'key.json')))
+            self.assertEqual(api.dispatch('jobs.get', {'id': 'stuck'})['state'], 'running')
+            with self.assertRaisesRegex(ValueError, 'Another analysis is running'):
+                api.dispatch('analysis.enqueue', {'id': track['id']})
+            with self.assertRaisesRegex(ValueError, 'still running'):
+                api.dispatch('library.remove', {'ids': [track['id']]})
+            api.stop_worker(worker)
+            failed = api.dispatch('jobs.get', {'id': 'stuck'})
+        self.assertEqual((failed['state'], failed['error']), ('failed', 'Analysis worker exited unexpectedly'))
+        self.assertFalse(status.exists())
+        self.assertEqual(api.dispatch('jobs.get', {'id': 'stuck'}), failed)
+
+    def test_playback_cache_evicts_least_recently_used_copies(self):
+        first, second = self.audio('one.wav'), self.audio('two.wav')
+        originals = [Path(track['path']).read_bytes() for track in (first, second)]
+        old = Path(playback.prepare(api, first)['path'])
+        os.utime(old, (1000, 1000))
+        self.assertEqual(playback.prepare(api, first)['path'], str(old))
+        self.assertGreater(old.stat().st_mtime, 1000)  # A cache hit counts as recent use.
+        os.utime(old, (1000, 1000))
+        abandoned = old.with_name('abandoned.partial.wav')
+        abandoned.write_bytes(b'interrupted')
+        os.utime(abandoned, (1000, 1000))
+        with patch.object(playback, 'MAX_CACHE_BYTES', old.stat().st_size):
+            new = Path(playback.prepare(api, second)['path'])
+        self.assertTrue(new.is_file())
+        self.assertFalse(old.exists())
+        self.assertFalse(abandoned.exists())
+        with patch.object(playback, 'MAX_CACHE_BYTES', 0):
+            self.assertEqual(playback.prepare(api, second)['path'], str(new))
+        self.assertTrue(new.is_file())  # The copy just handed out is never evicted.
+        self.assertEqual([Path(track['path']).read_bytes() for track in (first, second)], originals)
+        Path(first['path']).unlink()
+        with self.assertRaisesRegex(ValueError, 'missing'):
+            playback.prepare(api, first)
+
+    def test_playlist_delete_keeps_tracks_and_unlinks_the_set_report(self):
+        report = self.saved(1)
+        track = self.audio('stay.wav')
+        playlist = api.dispatch('playlists.save', {'name': 'Set', 'track_ids': [track['id']]})
+        other = api.dispatch('playlists.save', {'name': 'Other', 'track_ids': [track['id']]})
+        with api.connect() as db:
+            db.execute('UPDATE dj_sets SET playlist_id=? WHERE id=?', (playlist['id'], report['id']))
+            set_import.attach_track(db, report['id'], 0, track['id'])
+        self.assertEqual(api.dispatch('playlists.delete', {'id': playlist['id']}), {'deleted': True})
+        self.assertEqual(api.dispatch('playlists.list', {}), [other])
+        self.assertEqual([row['id'] for row in api.dispatch('library.list', {})], [track['id']])
+        self.assertTrue(Path(track['path']).is_file())
+        saved = api.dispatch('sets.get', {'id': report['id']})
+        self.assertIsNone(saved['playlist_id'])
+        self.assertEqual(saved['tracks'][0]['track_id'], track['id'])
+        with api.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM playlist_tracks WHERE playlist_id=?', (playlist['id'],)).fetchone()[0], 0)
+        for missing in (playlist['id'], 'unknown', None):
+            with self.subTest(id=missing), self.assertRaisesRegex(ValueError, 'Playlist not found'):
+                api.dispatch('playlists.delete', {'id': missing})
+
+    def test_library_remove_drops_records_but_never_the_audio(self):
+        report = self.saved(2)
+        keep, gone = self.audio('keep.wav'), self.audio('gone.wav')
+        original = Path(gone['path']).read_bytes()
+        playlist = api.dispatch('playlists.save', {'name': 'Set', 'track_ids': [keep['id'], gone['id']]})
+        api.dispatch('cues.save', {'id': gone['id'], 'cues': [{'slot': 0, 'position_us': 500000, 'label': 'Cue'}]})
+        api.dispatch('sections.save', {'id': gone['id'], 'sections': [{'id': 'intro', 'start_us': 0, 'end_us': 1000000, 'label': 'Intro'}]})
+        api.dispatch('cues.save', {'id': keep['id'], 'cues': [{'slot': 1, 'position_us': 250000, 'label': 'Kept'}]})
+        with api.connect() as db:
+            db.execute('UPDATE dj_sets SET playlist_id=? WHERE id=?', (playlist['id'], report['id']))
+            db.execute("INSERT INTO acquisitions(id,state,stage,review,created_at,updated_at,track_id,path) VALUES ('download','completed','Imported','{}','now','now',?,?)", (gone['id'], gone['path']))
+            set_import.attach_track(db, report['id'], 0, gone['id'], cue_pending=True)
+            set_import.attach_track(db, report['id'], 1, keep['id'])
+            db.execute("UPDATE dj_set_items SET download_id='download' WHERE set_id=? AND position=0", (report['id'],))
+            db.execute("INSERT INTO jobs (id,track_id,state,stage,status_path,output_path,cache_path,cache_key,error,kind) VALUES ('done',?,'succeeded','Complete','s','o','c','k',NULL,'beat')", (gone['id'],))
+        cached = api.CACHE / 'kept-analysis.json'
+        cached.write_text('{}')
+        for ids in ([], 'all', [1], None):
+            with self.subTest(ids=ids), self.assertRaises(ValueError):
+                api.dispatch('library.remove', {'ids': ids})
+        self.assertEqual(api.dispatch('library.remove', {'ids': [gone['id'], 'unknown', gone['id']]}), {'removed': 1})
+        self.assertEqual(Path(gone['path']).read_bytes(), original)
+        self.assertTrue(cached.is_file())
+        self.assertEqual([row['id'] for row in api.dispatch('library.list', {})], [keep['id']])
+        self.assertEqual(api.dispatch('track.get', {'id': keep['id']})['cues'][0]['label'], 'Kept')
+        self.assertEqual(api.dispatch('playlists.list', {})[0]['track_ids'], [keep['id']])
+        rows = api.dispatch('sets.get', {'id': report['id']})['tracks']
+        self.assertEqual([(row['track_id'], row['download_id']) for row in rows], [(None, None), (keep['id'], None)])
+        with api.connect() as db:
+            for table in ('cues', 'sections', 'jobs', 'playlist_tracks'):
+                self.assertEqual(db.execute(f'SELECT count(*) FROM {table} WHERE track_id=?', (gone['id'],)).fetchone()[0], 0, table)
+            self.assertEqual(db.execute('SELECT sum(cue_pending) FROM dj_set_items WHERE set_id=?', (report['id'],)).fetchone()[0], 0)
+            self.assertEqual(tuple(db.execute("SELECT state,track_id FROM acquisitions WHERE id='download'").fetchone()), ('completed', None))
+        self.assertEqual(api.dispatch('library.remove', {'ids': [gone['id']]}), {'removed': 0})
+        again = api.dispatch('library.import', {'path': gone['path']})
+        self.assertFalse(again['duplicate'])
+        self.assertNotEqual(again['id'], gone['id'])

@@ -7,12 +7,20 @@ from difflib import SequenceMatcher
 VERSION_WORD = re.compile(r'\b(remix|mix|edit|bootleg|mashup|rework|dub|instrumental|acoustic|live|extended|radio|original|remaster(?:ed)?)\b', re.I)
 NOISE = r'(?:official\s+(?:audio|music\s+video|video|visuali[sz]er)|lyrics?(?:\s+video)?|audio\s+only|hd|hq|4k|klikkaud|klickaud)'
 GENERIC_VERSION = set('remix mix edit bootleg mashup rework dub instrumental acoustic live extended radio original remaster remastered version club jersey'.split())
+VERSION_PHRASE = r'(?:original|extended|radio|club|instrumental|acoustic|live|remaster(?:ed)?)'
+# "Song - Live" or "Song - 2011 Remaster": after a separator a version word is explicit.
+DASH_VERSION = re.compile(r'\s+[-–—]\s+((?:[0-9]{4}\s+)?' + VERSION_PHRASE + r'(?:\s+(?:mix|edit|version))?(?:\s+[0-9]{4})?)$', re.I)
+# Without a delimiter only a full phrase counts: "In Da Club", "Born to Live"
+# and "The Original" are titles, "Song Club Mix" and "Song Radio Edit" are versions.
+PHRASE_VERSION = re.compile(r'\s+(' + VERSION_PHRASE + r'\s+(?:mix|edit|version)|instrumental)$', re.I)
 FEATURE = re.compile(r'\s*[\[(]\s*(?:feat\.?|ft\.?|featuring)\s+[^\])]+[\])]\s*|\s+(?:feat\.?|ft\.?|featuring)\s+.+$', re.I)
 
 
 def primary_artist(value):
     # Preserve the full credit in metadata; use the leading credit for retrieval.
-    return re.split(r'\s*(?:,|;|\bfeat\.?\s|\bft\.?\s|\bfeaturing\s)\s*', value, maxsplit=1, flags=re.I)[0].strip()
+    # "Tyler, The Creator" is one name: a comma before a closing "The <Word>"
+    # does not separate two credits.
+    return re.split(r'\s*(?:,(?!\s*the\s+[^\s,;&]+\s*(?:$|[,;&]|(?:feat\.?|ft\.?|featuring)\s))|;|\bfeat\.?\s|\bft\.?\s|\bfeaturing\s)\s*', value, maxsplit=1, flags=re.I)[0].strip()
 
 
 def base_title(value):
@@ -43,7 +51,7 @@ def split_version(title):
     base = re.sub(r'[\[(]([^\]\)]+)[\])]', bracket, title)
     # Explicit version suffixes are safe to split. A single unbracketed
     # remixer name is a search hint, not an artist credit to write to a file.
-    suffix = re.search(r'\s+((?:original|extended|radio|club|instrumental|acoustic|live|remaster(?:ed)?)(?:\s+(?:mix|edit|version))?)$', base, re.I)
+    suffix = DASH_VERSION.search(base) or PHRASE_VERSION.search(base)
     if not suffix:
         suffix = re.search(r'\s+((?:\S+\s+)?(?:jersey\s+club\s+)?(?:remix|bootleg|mashup|rework))$', base, re.I)
         if suffix and not base[:suffix.start()].strip():
@@ -93,7 +101,8 @@ def query_plan(identity, duration):
     base = 'recording:' + quote(identity['title'])
     credited = base + (' AND artist:' + quote(primary_artist(identity['artist'])) if identity['artist'] else '')
     version = identity['version']
-    specific = sorted(set(normalized(version).split()) - GENERIC_VERSION)
+    # Keep the words in their written order: the term is quoted as a phrase.
+    specific = [word for word in dict.fromkeys(normalized(version).split()) if word not in GENERIC_VERSION]
     version_term = ' '.join(specific) or version
     precise = credited
     if version_term:

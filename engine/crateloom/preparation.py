@@ -1,10 +1,13 @@
 """Playlists and staged metadata; original files change only on explicit write."""
-import hashlib,json,os,re,shutil,subprocess,tempfile,threading,time,urllib.parse,urllib.request,uuid
+import hashlib,json,os,re,subprocess,threading,urllib.parse,urllib.request,uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from .metadata_matching import catalog_identity
 
 FIELDS=('title','artist','album','genre','date')
+# ID3 stores dates as timestamps; other spellings do not survive the verified read-back.
+DATE=re.compile(r'[0-9]{4}(?:-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12][0-9]|3[01]))?)?')
+DATE_HELP='Date must be YYYY, YYYY-MM or YYYY-MM-DD'
 JOBS={}
 JOB_LOCK=threading.Lock()
 PROVIDER_POOL=ThreadPoolExecutor(max_workers=4,thread_name_prefix='provider')
@@ -33,9 +36,17 @@ def validate_image(api,source):
     if not streams or not 0<streams[0].get('width',0)<=4096 or not 0<streams[0].get('height',0)<=4096:raise ValueError('Artwork dimensions must be at most 4096 × 4096')
     dest=api.ROOT/'artwork'/ (hashlib.sha256(data).hexdigest()+suffix);api.atomic(dest,data);return str(dest)
 
+class SecureRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,req,fp,code,msg,headers,newurl):
+        # Refuse before the redirect is followed, so nothing is sent over plain HTTP.
+        if not newurl.startswith('https://'):raise ValueError('Insecure provider redirect rejected')
+        return super().redirect_request(req,fp,code,msg,headers,newurl)
+
+OPENER=urllib.request.build_opener(SecureRedirects)
+
 def request(url,limit=2*1024*1024,timeout=12):
     req=urllib.request.Request(url,headers={'User-Agent':'CrateLoom/0.1.0 (https://github.com/StewardMelvinTang/CrateLoom)','Accept':'application/json,image/jpeg,image/png'})
-    with urllib.request.urlopen(req,timeout=timeout) as response:
+    with OPENER.open(req,timeout=timeout) as response:
         if not response.url.startswith('https://'):raise ValueError('Insecure provider redirect rejected')
         data=response.read(limit+1)
         if len(data)>limit:raise ValueError('Provider response is too large')
@@ -66,27 +77,31 @@ def launch(fn,incremental=False,control=None):
     pending=dict(JOBS[jid])
     PROVIDER_POOL.submit(work);return pending
 
+def cached_cover(api,target,download):
+    if target.exists():
+        try:return validate_image(api,target)
+        # A cached download that no longer validates is fetched again once.
+        except Exception:target.unlink(missing_ok=True)
+    api.atomic(target,download());return validate_image(api,target)
+
 def fetch_cover(api,source,artwork_url=None):
     if source.get('provider')=='Apple Music':
         recording_id=source.get('recording_id')
         if not isinstance(recording_id,str) or not re.fullmatch(r'[0-9]{1,20}',recording_id):raise ValueError('Choose an Apple Music candidate first')
-        target=api.ROOT/'artwork'/('apple-'+recording_id+'.image')
-        if not target.exists():
-            if artwork_url is None:
+        def download():
+            url=artwork_url
+            if url is None:
                 from .metadata_lookup import cached_request
                 payload,_,_=cached_request(api,request,'Apple Music','https://itunes.apple.com/lookup?'+urllib.parse.urlencode({'id':recording_id,'entity':'song','country':'US'}))
                 row=next((r for r in payload['results'] if str(r.get('trackId'))==recording_id and r.get('kind')=='song'),None)
-                artwork_url=row.get('artworkUrl100','') if row else ''
-            host=urllib.parse.urlsplit(artwork_url or '').hostname or ''
-            if not (artwork_url or '').startswith('https://') or not host.endswith('.mzstatic.com'):raise ValueError('No usable cover was found for this Apple Music release.')
-            api.atomic(target,request(artwork_url.replace('100x100bb','600x600bb'),5*1024*1024))
-        return validate_image(api,target)
+                url=row.get('artworkUrl100','') if row else ''
+            host=urllib.parse.urlsplit(url or '').hostname or ''
+            if not (url or '').startswith('https://') or not host.endswith('.mzstatic.com'):raise ValueError('No usable cover was found for this Apple Music release.')
+            return request(url.replace('100x100bb','600x600bb'),5*1024*1024)
+        return cached_cover(api,api.ROOT/'artwork'/('apple-'+recording_id+'.image'),download)
     release=source.get('release_id')
     if not isinstance(release,str) or not re.fullmatch(r'[0-9a-fA-F-]{36}',release):raise ValueError('Choose a release candidate first')
-    target=api.ROOT/'artwork'/('release-'+release+'-1200.image')
-    try:
-        if not target.exists():api.atomic(target,request('https://coverartarchive.org/release/'+release+'/front-1200',5*1024*1024))
-        return validate_image(api,target)
+    try:return cached_cover(api,api.ROOT/'artwork'/('release-'+release+'-1200.image'),lambda:request('https://coverartarchive.org/release/'+release+'/front-1200',5*1024*1024))
     except Exception as error:raise ValueError('No usable front cover was found for this release. Choose a local image instead.') from error
 
 def dispatch(api,db,method,p):
@@ -104,6 +119,13 @@ def dispatch(api,db,method,p):
         db.execute('INSERT INTO playlists(id,name) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name',(pid,name.strip()))
         db.execute('DELETE FROM playlist_tracks WHERE playlist_id=?',(pid,));db.executemany('INSERT INTO playlist_tracks VALUES (?,?,?)',[(pid,tid,i) for i,tid in enumerate(ids)])
         return {'id':pid,'name':name.strip(),'track_ids':ids}
+    if method=='playlists.delete':
+        pid=p.get('id')
+        if not isinstance(pid,str) or not db.execute('SELECT 1 FROM playlists WHERE id=?',(pid,)).fetchone():raise ValueError('Playlist not found')
+        # Tracks stay in the library. A DJ-set report that used this playlist
+        # survives unlinked and can create a playlist again.
+        db.execute('DELETE FROM playlist_tracks WHERE playlist_id=?',(pid,));db.execute('UPDATE dj_sets SET playlist_id=NULL WHERE playlist_id=?',(pid,))
+        db.execute('DELETE FROM playlists WHERE id=?',(pid,));return {'deleted':True}
     if method=='metadata.job':
         if p.get('id') not in JOBS:raise ValueError('Metadata request expired; try again')
         return dict(JOBS[p['id']])
@@ -131,6 +153,11 @@ def dispatch(api,db,method,p):
         if not isinstance(fields,dict) or any(k not in FIELDS for k in fields):raise ValueError('Invalid metadata fields')
         if any(not isinstance(v,str) or len(v)>500 or '\x00' in v for v in fields.values()):raise ValueError('Metadata fields must be text up to 500 characters')
         if 'title' in fields and not fields['title'].strip():raise ValueError('Title cannot be empty')
+        # Only a newly entered date is checked: the editor sends every field
+        # back, including dates read from the file in other spellings.
+        if 'date' in fields and fields['date']!=state['values'].get('date',''):
+            fields['date']=fields['date'].strip()
+            if fields['date'] and not DATE.fullmatch(fields['date']):raise ValueError(DATE_HELP)
         for key,value in fields.items():
             if value!=state['values'].get(key,''):state['pending'][key]=value
             state['values'][key]=value
@@ -161,15 +188,24 @@ def dispatch(api,db,method,p):
         if not state['pending'] and not state.get('artwork_pending'):return {'track':t,'backup':None,'written':False}
         api.verify_asset(db,t);t=api.track(db,t['id'])
         if p.get('revision') is not None and p['revision']!=revision(state,t['file_hash']):raise ValueError('File tags changed after review. Reload and review before writing.')
+        if state['pending'].get('date') and not DATE.fullmatch(state['pending']['date']):raise ValueError(DATE_HELP+'. Correct the date before writing tags.')
+        # Ogg files cannot embed a cover here: their text tags are still written
+        # and the cover stays with the library entry instead of failing the write.
+        staged=bool(state.get('artwork_pending'));embed=staged and state['artwork_supported']
+        extra={'artwork_embedded':embed,**({} if embed else {'note':'The cover stays in the CrateLoom library; this file format cannot embed it.'})} if staged else {}
+        if not state['pending'] and not embed:
+            state.update(artwork_pending=False)
+            db.execute('UPDATE tracks SET metadata=? WHERE id=?',(json.dumps(state),t['id']))
+            return {'track':api.track(db,t['id']),'backup':None,'written':False,**extra}
         python=os.environ.get('CRATELOOM_METADATA_PYTHON')
         if not python or not Path(python).is_file():raise ValueError('Tag writer unavailable. Run scripts/setup-metadata-macos.sh and restart.')
         recipe=api.ROOT/'tag-receipts'/(uuid.uuid4().hex+'.json');output=recipe.with_suffix('.result.json')
-        api.atomic(recipe,json.dumps({'path':t['path'],'expected_hash':t['file_hash'],'fields':state['pending'],'artwork_path':state.get('artwork_path') if state.get('artwork_pending') else None,'write_artwork':bool(state.get('artwork_pending')),'backup_root':str(api.ROOT/'tag-backups')}).encode())
+        api.atomic(recipe,json.dumps({'path':t['path'],'expected_hash':t['file_hash'],'fields':state['pending'],'artwork_path':state.get('artwork_path') if embed else None,'write_artwork':embed,'backup_root':str(api.ROOT/'tag-backups')}).encode())
         env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parent.parent)}
         result=subprocess.run([python,'-m','crateloom.tag_writer',str(recipe),str(output)],env=env,capture_output=True,text=True,timeout=900)
         receipt=json.loads(output.read_text()) if output.exists() else {'error':'Tag writer stopped before verification; original replacement was not confirmed.'}
         if result.returncode or receipt.get('error'):raise ValueError(receipt.get('error','Tag write failed'))
         state.update(pending={},artwork_pending=False)
         db.execute('UPDATE tracks SET file_hash=?,metadata=? WHERE id=?',(receipt['file_hash'],json.dumps(state),t['id']))
-        return {'track':api.track(db,t['id']),'backup':receipt['backup'],'written':True}
+        return {'track':api.track(db,t['id']),'backup':receipt['backup'],'written':True,**extra}
     raise ValueError('Unknown preparation method')

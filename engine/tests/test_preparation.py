@@ -108,3 +108,73 @@ class Preparation(unittest.TestCase):
    response('metadata.save',{'id':tid,'values':{'title':'First'}});review=response('metadata.get',{'id':tid})['result']
    response('metadata.save',{'id':tid,'values':{'title':'Second'}})
    stale=response('metadata.write',{'id':tid,'revision':review['revision']});self.assertIn('changed after review',stale['error']['message']);self.assertEqual(original,audio.read_bytes())
+
+ def engine(self,root):
+  env={**os.environ,'CRATELOOM_DATA':str(root/'data'),'PYTHONPATH':str(Path(__file__).resolve().parents[1])}
+  def response(method,params={}):
+   req={'protocol_version':1,'request_id':'t','method':method,'params':params};r=subprocess.run([sys.executable,'-m','crateloom'],input=json.dumps(req)+'\n',text=True,capture_output=True,env=env,check=True);return json.loads(r.stdout)
+  def call(method,params={}):
+   out=response(method,params);self.assertNotIn('error',out);return out['result']
+  return response,call
+
+ def test_new_dates_must_be_iso_but_existing_file_dates_can_be_saved_unchanged(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp);audio=root/'dated.flac'
+   subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=1','-metadata','date=May 2020','-y',str(audio)],check=True)
+   response,call=self.engine(root);tid=call('library.import',{'path':str(audio)})['id']
+   current=call('metadata.get',{'id':tid})['values'];self.assertEqual(current['date'],'May 2020')
+   # The editor sends every field back; an untouched legacy date must not block a title edit.
+   call('metadata.save',{'id':tid,'values':{**current,'title':'Renamed'}})
+   self.assertEqual(call('metadata.get',{'id':tid})['pending'],{'title':'Renamed'})
+   for bad in ('June 2021','17/05/2026','2026-5-7','2026-13-01','2007-10-09T07:00:00Z'):
+    with self.subTest(date=bad):self.assertIn('YYYY-MM-DD',response('metadata.save',{'id':tid,'values':{'date':bad}})['error']['message'])
+   self.assertNotIn('date',call('metadata.get',{'id':tid})['pending'])
+   for good in ('2026','2026-05',' 2026-05-17 ',''):
+    with self.subTest(date=good):
+     call('metadata.save',{'id':tid,'values':{'date':good}});self.assertEqual(call('metadata.get',{'id':tid})['pending']['date'],good.strip())
+
+ @unittest.skipUnless(WRITER and Path(WRITER).is_file(),'Set CRATELOOM_METADATA_PYTHON')
+ def test_id3_dates_survive_read_back_and_a_legacy_bad_date_is_refused_clearly(self):
+  import sqlite3
+  for version in ('3','4'):
+   with self.subTest(id3=version),tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);audio=root/'dated.mp3'
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=1','-id3v2_version',version,'-metadata','title=Dated','-y',str(audio)],check=True)
+    response,call=self.engine(root);tid=call('library.import',{'path':str(audio)})['id']
+    call('metadata.save',{'id':tid,'values':{'date':'2026-05-17'}});self.assertTrue(call('metadata.write',{'id':tid})['written'])
+    self.assertEqual(call('metadata.reload',{'id':tid})['values']['date'],'2026-05-17')
+    # A date staged before validation existed fails the ID3 read-back; refuse it with a usable message.
+    call('metadata.save',{'id':tid,'values':{'album':'Album'}});before=audio.read_bytes()
+    with sqlite3.connect(root/'data'/'library.sqlite3') as db:
+     state=json.loads(db.execute('SELECT metadata FROM tracks WHERE id=?',(tid,)).fetchone()[0]);state['pending']['date']=state['values']['date']='May 2020'
+     db.execute('UPDATE tracks SET metadata=? WHERE id=?',(json.dumps(state),tid))
+    db.close()
+    refused=response('metadata.write',{'id':tid});self.assertIn('YYYY-MM-DD',refused['error']['message']);self.assertEqual(audio.read_bytes(),before)
+    call('metadata.save',{'id':tid,'values':{'date':'2020-05'}});self.assertTrue(call('metadata.write',{'id':tid})['written'])
+
+ @unittest.skipUnless(WRITER and Path(WRITER).is_file(),'Set CRATELOOM_METADATA_PYTHON')
+ def test_ogg_write_keeps_text_tags_and_leaves_the_cover_in_the_library(self):
+  for extension,codec in [('ogg','vorbis'),('opus','libopus')]:
+   with self.subTest(extension=extension),tempfile.TemporaryDirectory() as tmp:
+    root=Path(tmp);audio=root/('cover.'+extension);image=root/'cover.png'
+    made=subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=2','-ac','2','-strict','-2','-c:a',codec,'-metadata','title=Original','-y',str(audio)])
+    if made.returncode:self.skipTest('ffmpeg cannot encode '+codec)
+    subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','color=c=red:s=32x32:d=0.04','-frames:v','1','-threads','1','-y',str(image)],check=True)
+    response,call=self.engine(root);track=call('library.import',{'path':str(audio)});tid=track['id']
+    self.assertFalse(call('metadata.get',{'id':tid})['artwork_supported'])
+    art=call('metadata.artwork',{'path':str(image)})['path']
+    # The automatic batch stages a cover for every codec, alongside text fields.
+    call('metadata.save',{'id':tid,'values':{'title':'Catalog title','album':'Album'},'artwork_path':art})
+    review=call('metadata.get',{'id':tid});self.assertTrue(review['artwork_pending'])
+    result=call('metadata.write',{'id':tid,'revision':review['revision']})
+    self.assertTrue(result['written']);self.assertFalse(result['artwork_embedded']);self.assertIn('library',result['note'])
+    after=call('metadata.get',{'id':tid})
+    self.assertEqual((after['pending'],after['artwork_pending'],after['artwork_path']),({},False,art))
+    self.assertEqual(call('track.get',{'id':tid})['audio_hash'],track['audio_hash'])
+    streams=json.loads(subprocess.run(['ffprobe','-v','error','-show_streams','-of','json',str(audio)],capture_output=True,text=True,check=True).stdout)['streams']
+    self.assertEqual([s['codec_type'] for s in streams],['audio']);self.assertEqual({k.lower():v for k,v in streams[0]['tags'].items()}['title'],'Catalog title')
+    # A cover staged on its own has nothing to write: no backup, no rewrite, nothing left pending.
+    call('metadata.save',{'id':tid,'values':{},'artwork_path':None});before=audio.read_bytes()
+    alone=call('metadata.write',{'id':tid})
+    self.assertEqual((alone['written'],alone['backup'],alone['artwork_embedded']),(False,None,False));self.assertEqual(audio.read_bytes(),before)
+    self.assertFalse(call('metadata.get',{'id':tid})['artwork_pending'])

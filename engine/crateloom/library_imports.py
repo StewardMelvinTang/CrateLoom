@@ -4,7 +4,9 @@ from pathlib import Path
 import threading
 import uuid
 
-EXTENSIONS={'.mp3','.wav','.aiff','.aif','.m4a','.flac','.ogg'}
+# Raw ADTS .aac is left out on purpose: ffprobe only estimates its duration
+# from the bitrate, which would put cue and analysis bounds seconds off.
+EXTENSIONS={'.mp3','.wav','.aiff','.aif','.m4a','.flac','.ogg','.opus'}
 RUNNING={}
 THREADS={}
 MAX_FILES=5000
@@ -22,28 +24,41 @@ def start(api, paths, folder):
         api.IMPORT_CONTEXT.cancel=stop
         try:
             files=[]; seen=set()
-            def add(p):
+            def push(path,problem=None):
+                if len(files)>=MAX_FILES: raise ValueError('Choose a smaller folder: import limit is 5,000 audio files')
+                files.append((str(path),problem))
+            def add(p,chosen=False):
                 if stop.is_set(): raise ImportCancelled()
-                p=Path(p).resolve(strict=True)
-                if p.is_file() and p.suffix.lower() in EXTENSIONS and str(p) not in seen:
-                    if len(files)>=MAX_FILES: raise ValueError('Choose a smaller folder: import limit is 5,000 audio files')
-                    files.append(str(p));seen.add(str(p))
+                try: resolved=Path(p).resolve(strict=True)
+                except OSError as error:
+                    # One missing or unreadable path is reported as its own failed
+                    # item; the rest of the batch still imports.
+                    if chosen or Path(p).suffix.lower() in EXTENSIONS:
+                        push(p,'File not found' if isinstance(error,FileNotFoundError) else 'File could not be read: '+(error.strerror or str(error)))
+                    return
+                if resolved.is_file() and resolved.suffix.lower() in EXTENSIONS and str(resolved) not in seen:
+                    push(resolved);seen.add(str(resolved))
             if folder:
-                root=Path(folder).expanduser().resolve(strict=True)
+                try: root=Path(folder).expanduser().resolve(strict=True)
+                except OSError as error: raise ValueError('The folder could not be opened. Choose it again.') from error
                 if not root.is_dir(): raise ValueError('Choose a folder')
-                def scan_error(error): raise error
+                def scan_error(error):
+                    # Skip an unreadable subfolder with a recorded reason instead of
+                    # failing every other file in the tree.
+                    push(error.filename or root,'Folder could not be read: '+(error.strerror or str(error)))
                 for parent, dirs, names in os.walk(root,followlinks=False,onerror=scan_error):
                     if stop.is_set(): raise ImportCancelled()
                     dirs[:]=sorted(d for d in dirs if not d.startswith('.'))
                     for name in sorted(names):
                         if not name.startswith('.') and not Path(parent,name).is_symlink(): add(Path(parent,name))
             else:
-                for p in paths: add(p)
+                for p in paths: add(p,True)
             with api.connect() as db: db.execute("UPDATE library_imports SET state='running',total=? WHERE id=?",(len(files),jid))
-            for sequence,path in enumerate(files):
+            for sequence,(path,problem) in enumerate(files):
                 if stop.is_set(): raise ImportCancelled()
                 with api.connect() as db: db.execute('UPDATE library_imports SET current=? WHERE id=?',(Path(path).name,jid))
                 try:
+                    if problem: raise ValueError(problem)
                     with api.connect() as db:
                         result,duplicate=api.import_track(db,path)
                         db.execute('INSERT INTO library_import_items VALUES (?,?,?,?,?,?)',(jid,sequence,path,'duplicate' if duplicate else 'imported',result['id'],None))

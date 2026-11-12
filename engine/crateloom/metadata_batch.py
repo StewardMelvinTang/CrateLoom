@@ -20,8 +20,15 @@ def fingerprint(track):
     metadata = track.get('metadata')
     if isinstance(metadata, str):
         metadata = json.loads(metadata)
-    return hashlib.sha256(json.dumps({key: metadata if key == 'metadata' else track.get(key)
-                                     for key in ('title', 'artist', 'metadata', 'file_hash')}, sort_keys=True).encode()).hexdigest()
+    # Opening the editor stores the file's current tags (and embedded cover) as
+    # an untouched baseline. Only staged edits count as a change, so reading
+    # metadata never invalidates a queued item.
+    metadata = metadata if isinstance(metadata, dict) else {}
+    staged = {'pending': metadata.get('pending') or {}, 'artwork_pending': bool(metadata.get('artwork_pending')),
+              'artwork_path': metadata.get('artwork_path') if metadata.get('artwork_pending') else None,
+              'source': metadata.get('source'), 'automatic': metadata.get('automatic')}
+    return hashlib.sha256(json.dumps({'title': track.get('title'), 'artist': track.get('artist'), 'file_hash': track.get('file_hash'),
+                                     'staged': staged}, sort_keys=True).encode()).hexdigest()
 
 
 def review_token(track):
@@ -190,7 +197,9 @@ class BatchManager:
                 return
             source = {key: selected[key] for key in ('provider', 'recording_id', 'release_id') if selected.get(key)}
             source.setdefault('provider', 'MusicBrainz')
-            fields = {key: value for key, value in selected['values'].items() if value and key in preparation.FIELDS}
+            # A catalog date the tag writer cannot store is dropped, not fatal.
+            fields = {key: value for key, value in selected['values'].items() if value and key in preparation.FIELDS
+                      and (key != 'date' or preparation.DATE.fullmatch(value))}
             # Keep network work outside the transaction. The lock makes Cancel
             # and this final metadata write mutually exclusive.
             with self.lock:

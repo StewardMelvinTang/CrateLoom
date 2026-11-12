@@ -58,3 +58,40 @@ class LibraryImports(unittest.TestCase):
                     time.sleep(.05)
                 self.assertEqual(j['state'],'cancelled',j);self.assertEqual(call('library.list'),[])
             finally:p.stdin.close();p.wait(timeout=5);p.stdout.close()
+
+    def test_missing_path_and_unreadable_subfolder_fail_only_their_own_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);folder=root/'folder';locked=folder/'locked';locked.mkdir(parents=True)
+            good=folder/'good.wav';subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=440:duration=2','-y',str(good)],check=True)
+            subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=660:duration=2','-y',str(locked/'hidden.wav')],check=True)
+            opus=folder/'voice.opus';encoded=subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=frequency=550:duration=2','-c:a','libopus','-y',str(opus)]).returncode==0
+            (folder/'raw.aac').write_bytes(b'not imported in bulk')
+            env={**os.environ,'CRATELOOM_DATA':str(root/'data'),'PYTHONPATH':str(Path(__file__).resolve().parents[1])}
+            proc=subprocess.Popen([sys.executable,'-m','crateloom'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,env=env)
+            def call(method,params={}):
+                proc.stdin.write(json.dumps({'protocol_version':1,'request_id':'t','method':method,'params':params})+'\n');proc.stdin.flush()
+                r=json.loads(proc.stdout.readline());self.assertNotIn('error',r);return r['result']
+            def finish(job):
+                deadline=time.monotonic()+15;items=list(job['items'])
+                while job['state'] in ('scanning','running') and time.monotonic()<deadline:
+                    time.sleep(.05);job=call('imports.get',{'id':job['id'],'cursor':len(items)});items+=job['items']
+                self.assertEqual(job['state'],'completed',job);return job,items
+            try:
+                missing=root/'gone.wav'
+                job,items=finish(call('imports.start',{'paths':[str(missing),str(good)]}))
+                self.assertEqual((job['total'],job['imported'],job['failed']),(2,1,1))
+                self.assertEqual([(i['path'],i['state'],i['error']) for i in items if i['state']=='failed'],[(str(missing),'failed','File not found')])
+                unreadable=os.geteuid()!=0
+                locked.chmod(0)
+                try:
+                    job,items=finish(call('imports.start',{'folder':str(folder)}))
+                finally:locked.chmod(0o755)
+                states={Path(i['path']).name:i for i in items}
+                self.assertEqual(states['good.wav']['state'],'duplicate');self.assertNotIn('raw.aac',states)
+                if encoded:self.assertEqual(states['voice.opus']['state'],'imported')
+                if unreadable:
+                    self.assertEqual(states['locked']['state'],'failed');self.assertIn('Folder could not be read',states['locked']['error'])
+                    self.assertEqual(job['failed'],1);self.assertNotIn('hidden.wav',states)
+                self.assertEqual(len(call('library.list')),1+encoded)
+            finally:
+                proc.stdin.close();proc.wait(timeout=5);proc.stdout.close()
