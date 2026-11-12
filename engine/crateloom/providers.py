@@ -9,7 +9,7 @@ import urllib.error
 import uuid
 
 from . import download_http, playlist_sources, preparation, service_links, youtube_audio
-from .metadata_matching import search_identity, query_plan, rank_candidates
+from .metadata_matching import normalized, search_identity, split_version, query_plan, rank_candidates
 
 CANDIDATES = {}
 LOCK = threading.Lock()
@@ -85,10 +85,44 @@ def musicbrainz(path, params):
         raise ValueError('MusicBrainz is unavailable. Retry later or paste a direct audio URL.')
 
 
+def credit_split(identity):
+    """Find the artist in a query typed without a separator ("daft punk one more time").
+
+    One loose catalog request looks for recordings whose artist and title
+    together use exactly the typed words; the typed text is then split there.
+    """
+    words = normalized(identity['title']).split()
+    if identity['artist'] or not 3 <= len(words) <= 12:
+        return identity
+    terms = ' '.join(words)
+    try:
+        payload = musicbrainz('recording/', {'query': f'recording:({terms}) AND artist:({terms})', 'fmt': 'json', 'limit': 25})
+    except ValueError:
+        return identity
+    for item in payload.get('recordings', []):
+        credits = item.get('artist-credit') or []
+        artist = normalized(credits[0].get('name', '')) if credits and isinstance(credits[0], dict) else ''
+        title = normalized(split_version(item.get('title', ''))[0])
+        if not artist or not title:
+            continue
+        for first, second in ((artist, title), (title, artist)):
+            if terms == f'{first} {second}' or (first == artist and terms.startswith(artist + ' ' + title + ' ')):
+                # Keep the owner's own spelling for the title and any version words.
+                count = len(artist.split())
+                raw = identity['title'].split()
+                if len(raw) != len(words):
+                    return search_identity(item['title'], credits[0]['name'])
+                return search_identity(' '.join(raw[count:] if first == artist else raw[:len(raw) - count]),
+                                       ' '.join(raw[:count] if first == artist else raw[len(raw) - count:]))
+    return identity
+
+
 def recording_search(api, text, duration=None, isrc=None):
     identity = search_identity(text) if isinstance(text, str) else text
     if not identity['title']:
         raise ValueError('Enter a song title or direct audio URL')
+    if isinstance(text, str) and not isrc:
+        identity = credit_split(identity)
     collected = {}
     queries = ['isrc:'+isrc] if isrc else query_plan(identity, duration)
     for terms in queries:

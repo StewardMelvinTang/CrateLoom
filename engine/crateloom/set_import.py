@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -417,7 +418,8 @@ def scan(api, watch, path, pasted, recognize):
             try:
                 result = shazam_scan.scan(api,watch,path,batch=False) if listed else shazam_scan.scan(api,watch,path)
             except ValueError as error:
-                notes.append(str(error))
+                # Say which step this note is about; the published list is still saved.
+                notes.append('The mix audio was not scanned. ' + str(error) if listed else str(error))
     except ImportCancelled:
         cancelled = True
         result = control.partial if control and control.partial else {}
@@ -534,7 +536,7 @@ def delete_report(db, sid):
 
 
 def list_reports(db):
-    return [dict(row) for row in db.execute("""SELECT s.id,s.name,s.playlist_id,h.created_at,
+    rows = [dict(row) for row in db.execute("""SELECT s.id,s.name,s.playlist_id,s.watch,s.warning,h.created_at,
         count(i.position) AS entries,count(i.track_id) AS imported,
         coalesce(sum(i.download_id IS NOT NULL AND i.track_id IS NULL),0) AS with_download,
         c.offset,c.duration,coalesce(a.enabled,0) AS automatic
@@ -543,6 +545,13 @@ def list_reports(db):
         LEFT JOIN dj_set_auto_scan a ON a.set_id=s.id
         LEFT JOIN dj_set_items i ON i.set_id=s.id
         GROUP BY s.id ORDER BY s.rowid DESC""")]
+    for row in rows:
+        # Agree with the report itself, which also recognises older partial scans.
+        state = scan_checkpoint(db,row) if row['offset'] is None else None
+        if state:
+            row.update(offset=state['offset'],duration=state['duration'])
+        del row['watch'],row['warning']
+    return rows
 
 
 def scan_checkpoint(db, saved):
@@ -647,9 +656,20 @@ def queue_auto_scan(db, sid, watch):
         ON CONFLICT(set_id) DO UPDATE SET enabled=1,failures=0""",(sid,))
 
 
-def set_auto_scan(db, sid, enabled):
+def set_youtube_access(db, sid, browser):
+    if browser not in (None,*youtube_audio.BROWSERS):
+        raise ValueError('Choose a supported YouTube browser session.')
+    db.execute('DELETE FROM dj_set_youtube_access WHERE set_id=?',(sid,))
+    if browser:
+        db.execute('INSERT INTO dj_set_youtube_access VALUES (?,?)',(sid,browser))
+
+
+def set_auto_scan(db, sid, enabled, access=False):
     db.execute('BEGIN IMMEDIATE')
     saved = get_set(db,sid)
+    if access is not False:
+        # The owner can change which session a paused scan resumes with.
+        set_youtube_access(db,sid,access)
     state = scan_checkpoint(db,saved)
     if not state or state['offset'] is None:
         raise ValueError('This report has no unfinished audio scan.')
@@ -783,6 +803,8 @@ def matching_track(library, item):
 def report(db, sid):
     result = get_set(db, sid)
     state = scan_checkpoint(db,result)
+    access = db.execute('SELECT browser FROM dj_set_youtube_access WHERE set_id=?',(sid,)).fetchone()
+    result['youtube_browser'] = access['browser'] if access else None
     if state:
         result['scan'] = {field:state[field] for field in ('offset','duration','retry_at')}
         auto = db.execute('SELECT enabled,failures FROM dj_set_auto_scan WHERE set_id=?',(sid,)).fetchone()
@@ -1122,7 +1144,9 @@ def prepare_set(api, sid, name, override=None):
 def dispatch(api, db, method, p):
     global SPOTIFY_TOKEN
     if method == 'sets.capabilities':
-        return {'fingerprinting': shazam_scan.interpreter() is not None}
+        return {'fingerprinting': shazam_scan.interpreter() is not None,
+                'spotify_connected': bool(SPOTIFY_TOKEN or os.environ.get('CRATELOOM_SPOTIFY_TOKEN','').strip()),
+                'soundcloud_connected': soundcloud_download.configured()}
     if method == 'sets.configure_spotify':
         token = p.get('token')
         if not isinstance(token, str) or (token and not re.fullmatch(r'[!-~]{1,4096}', token)):
@@ -1146,7 +1170,7 @@ def dispatch(api, db, method, p):
         enabled = p.get('enabled')
         if type(enabled) is not bool:
             raise ValueError('Invalid automatic scan setting.')
-        return set_auto_scan(db,p.get('id'),enabled)
+        return set_auto_scan(db,p.get('id'),enabled,(p['youtube_browser'] or None) if 'youtube_browser' in p else False)
     if method == 'sets.cancel_task':
         with set_scan_jobs.LOCK:
             control = set_scan_jobs.CONTROLS.get(p.get('task_id'))

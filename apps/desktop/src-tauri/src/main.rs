@@ -81,6 +81,7 @@ async fn engine_call(
         "providers.cover",
         "acquisitions.list",
         "acquisitions.clear_completed",
+        "acquisitions.clear_failed",
         "acquisitions.enqueue",
         "acquisitions.cancel",
         "acquisitions.retry",

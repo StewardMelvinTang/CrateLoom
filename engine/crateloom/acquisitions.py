@@ -259,6 +259,11 @@ class Manager(AudioTransfer):
             return db.execute("""INSERT OR IGNORE INTO hidden_acquisition_history(id)
                 SELECT id FROM acquisitions WHERE state='completed'""").rowcount
 
+    def clear_failed(self):
+        with self.api.connect() as db:
+            return db.execute("""INSERT OR IGNORE INTO hidden_acquisition_history(id)
+                SELECT id FROM acquisitions WHERE state IN ('failed','cancelled','interrupted')""").rowcount
+
     def get(self, jid):
         with self.api.connect() as db:
             row = db.execute('SELECT * FROM acquisitions WHERE id=?',(jid,)).fetchone()
@@ -322,6 +327,8 @@ class Manager(AudioTransfer):
                 raise ValueError('Only a failed, cancelled or interrupted download can be retried')
             if db.execute("SELECT count(*) FROM acquisitions WHERE state IN ('queued','downloading','verifying','importing','cancelling')").fetchone()[0] >= SET_CAPACITY:
                 raise ValueError('The download queue is full. Wait or cancel a queued item.')
+            # A retried download is live again, so it returns to the visible list.
+            db.execute('DELETE FROM hidden_acquisition_history WHERE id=?',(jid,))
             db.execute("UPDATE acquisitions SET state='queued',stage='Queued',attempt=attempt+1,downloaded_bytes=0,error=NULL,path=NULL,quality=NULL,track_id=NULL,duplicate=0,updated_at=? WHERE id=?",(now(),jid))
         self.ensure_worker()
         return self.get(jid)
@@ -540,6 +547,8 @@ def dispatch(api, method, params):
         result = item.list();item.ensure_worker(wake=False);return result
     if method == 'acquisitions.clear_completed':
         return {'cleared': item.clear_completed()}
+    if method == 'acquisitions.clear_failed':
+        return {'cleared': item.clear_failed()}
     if method == 'acquisitions.enqueue':
         return item.enqueue(params)
     if method == 'acquisitions.cancel':
