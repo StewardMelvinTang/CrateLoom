@@ -1,0 +1,285 @@
+// Run against Vite or the production build with fixture IPC, without touching a library.
+const {chromium,webkit}=require(process.env.CRATELOOM_PLAYWRIGHT || 'playwright');
+const engine=process.env.CRATELOOM_UI_ENGINE || 'chromium';
+const baseUrl=process.env.CRATELOOM_UI_URL || 'http://localhost:1420';
+const fs=require('fs'); const assert=require('node:assert/strict');
+(async()=>{
+ const browser=await ({chromium,webkit}[engine]).launch({headless:true});
+ const page=await browser.newPage({viewport:{width:1280,height:900},deviceScaleFactor:1});
+ const errors=[];page.on('pageerror',error=>errors.push(error.message));
+ const wav=Buffer.alloc(44+44100*2*8);wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(44100,24);wav.writeUInt32LE(88200,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(wav.length-44,40);for(let i=44;i<wav.length;i+=2)wav.writeInt16LE(Math.round(Math.sin(i/2/44100*440*2*Math.PI)*5000),i);
+ await page.route('**/__qa/audio.wav',route=>route.fulfill({contentType:'audio/wav',body:wav}));
+ await page.route('**/__qa/cover-*',route=>route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#53504a"/><path d="M0 68L100 20V100H0Z" fill="#a39b89"/><circle cx="56" cy="42" r="20" fill="#d6d0c4"/></svg>'}));
+ await page.addInitScript(()=>{
+ localStorage.setItem('theme','dark');
+ const songs=[['Low (feat. T-Pain)','Flo Rida, T-Pain'],['The Days (Notion Remix)','CHRYSTAL'],["Don\u2019t Stop the Music",'MITCH DB, Level 8, MusicByDavid'],['Starships','Nicki Minaj'],['One More Time','Daft Punk']];
+ const tracks=songs.map(([title,artist],i)=>({id:'t'+i,title,artist,path:'/audio.wav',duration:8,codec:location.search.includes('fallback')?'pcm_s16be':'mp3',sample_rate:44100,missing:false,cues:[],sections:[],analysis:null,structure_analysis:null,grid_offset_us:0,metadata:{values:{title,artist},pending:{},artwork_path:'/cover-0'},detail_analysis:{version:'librosa-0.11.0-rgb-5',cache_path:'',cache_key:'x'}}));
+ const playlist={id:'p',name:'Friday selections',track_ids:JSON.parse(localStorage.getItem('qaOrder') || '["t0","t1","t2","t3","t4"]')};
+ let report={id:'set',name:'Friday selections',watch:null,playlist_id:'p',warning:null,tracks:songs.map(([title,artist],i)=>({entry_id:'e'+i,position:i,at:null,title,artist,duration:180+i*23,artwork_path:'/cover-'+i,evidence:['Spotify'],track_id:i===0?'t0':null,playback_track_id:i===0?'t0':null,download_id:null,download_state:null,error:null,needs_review:i>0,links:[{label:'Spotify',url:'https://open.spotify.com/track/123'}],source_options:i===0?[]:Array.from({length:i===1?10:(location.search.includes('sole')?1:2)},(_,j)=>({title:j===0?`${artist} \u2014 ${title} (Extended Mix)`:`${artist} \u2014 ${title} (${['Official Audio','Official Music Video','Lyrics','Club Edit'][j%4]})`,url:`https://www.youtube.com/watch?v=${i}${j}123456789`,duration:180+j*12,compatible:true,recommended:j===0,recommendation_reason:'Extended mix'}))}))};
+ const tasks=new Map();let count=0;
+ const savedTracks=JSON.parse(localStorage.getItem('qaMetadataTracks') || 'null');if(savedTracks)tracks.splice(0,tracks.length,...savedTracks);
+ let metadataBatch=JSON.parse(localStorage.getItem('qaMetadataBatch') || 'null');
+ const copy=value=>JSON.parse(JSON.stringify(value));
+ const batchSnapshot=()=>{
+   if(!metadataBatch)return null;
+   const elapsed=Date.now()-metadataBatch.started;
+   if(metadataBatch.state==='cancelling'){
+     metadataBatch.state='cancelled';metadataBatch.items.forEach(item=>{if(['queued','running'].includes(item.state))item.state='cancelled';});
+   }else if(metadataBatch.state==='running'){
+     const done=elapsed>metadataBatch.duration?metadataBatch.items.length:elapsed>800?1:0;
+     metadataBatch.items.forEach((item,i)=>{
+       if(i>=done || ['applied','needs_review'].includes(item.state))return;
+       const track=tracks.find(t=>t.id===item.id);
+       const choice={provider:'Apple Music',recording_id:String(101+i),release_id:'456',values:{...track.metadata.values,album:'Automatic album',date:'2007-10-09',genre:'House'},rank:99,match_status:'strong',duration:track.duration,duration_difference:0,version:'',reasons:[]};
+       if(metadataBatch.items.length>1 && i===metadataBatch.items.length-1){
+         item.state='needs_review';item.error='No usable album cover was found.';
+         track.metadata.automatic_review={state:'needs_review',reason:item.error,candidates:[choice],warnings:[]};
+       }else{
+         item.state='applied';track.metadata={values:choice.values,pending:choice.values,artwork_path:'/cover-'+track.id,artwork_pending:true,source:{provider:choice.provider,recording_id:choice.recording_id,release_id:choice.release_id},automatic:{rank:99,match_status:'strong',reviewed:false},automatic_review:{state:'applied',candidates:[choice],warnings:[],query:{title:track.title,artist:track.artist,version:''}}};
+       }
+     });
+     if(done===metadataBatch.items.length)metadataBatch.state='completed';
+   }
+   metadataBatch.processed=metadataBatch.items.filter(item=>!['queued','running','cancelled'].includes(item.state)).length;
+   for(const state of ['applied','needs_review','failed','skipped','cancelled'])metadataBatch[state]=metadataBatch.items.filter(item=>item.state===state).length;
+   localStorage.setItem('qaMetadataTracks',JSON.stringify(tracks));localStorage.setItem('qaMetadataBatch',JSON.stringify(metadataBatch));return copy(metadataBatch);
+ };
+ window.__TAURI_INTERNALS__={convertFileSrc:path=>path.startsWith('/cover')?'/__qa'+path:'/__qa/audio.wav',invoke:async(cmd,args)=>{
+ if(cmd==='open_reference')return;
+ if(cmd!=='engine_call')return;
+ const {method,params:p}=args;
+ switch(method){
+ case 'handshake':return {fast_sections:false,semantic_analysis:false,structure_max_duration:1800};
+ case 'library.list':return copy(tracks);
+ case 'playlists.list':{const snapshot=copy(playlist);if(window.__qaStaleNext){window.__qaStaleNext=false;window.__qaStaleStarted=true;await new Promise(resolve=>setTimeout(resolve,400));}return [snapshot];}
+ case 'acquisitions.list':case 'sets.pending_analysis':return [];
+ case 'imports.latest':return null;
+ case 'metadata.batch.latest':return batchSnapshot();
+ case 'metadata.batch.start':{
+   window.__qaMetadataStarted=p.track_ids;metadataBatch={id:'batch'+count++,state:'running',total:p.track_ids.length,started:Date.now(),duration:window.__qaSlowMetadata?15000:1400,items:p.track_ids.map(id=>({id,title:tracks.find(t=>t.id===id).title,state:'running',stage:'Finding best metadata'}))};return batchSnapshot();
+ }
+ case 'metadata.batch.get':return batchSnapshot();
+ case 'metadata.batch.cancel':metadataBatch.state='cancelling';return copy(metadataBatch);
+ case 'sets.capabilities':return {fingerprinting:true};
+ case 'sets.scan':{window.__qaLastScanParams=copy(p);const id='scan'+count++;tasks.set(id,{scan:true,audio:p.fingerprint,started:Date.now(),cancelled:0});return {id,state:'running',cancellable:true,progress:{stage:'Reading published tracklist',completed:0,total:null,unit:'steps'}};}
+ case 'sets.cancel_task':{const scan=tasks.get(p.task_id);scan.cancelled=Date.now();return {id:p.task_id,state:'cancelling',cancellable:true};}
+ case 'sets.cancel_scan':report.scan={...report.scan,automatic:false,running:false,cancelling:false,progress:undefined};return copy(report);
+ case 'sets.auto_scan':report.scan={...report.scan,automatic:p.enabled,running:false,progress:undefined};return copy(report);
+ case 'sets.list':return [{id:'set',name:report.name,entries:5,imported:1,offset:null,automatic:0}];
+ case 'sets.get':{const snapshot=copy(report);if(window.__qaStaleSetNext){window.__qaStaleSetNext=false;window.__qaStaleSetStarted=true;await new Promise(resolve=>setTimeout(resolve,400));}return snapshot;}
+ case 'playback.prepare':{const id='playback'+count++;tasks.set(id,{end:Date.now()+350,playback:true});window.__qaPlaybackRequests=(window.__qaPlaybackRequests||0)+1;return {id,state:'running'};}
+ case 'sets.artwork':{const id='art'+count++;tasks.set(id,{end:Date.now()+100});return {id,state:'running'};}
+ case 'sets.add_source':{window.__qaSourceRequests=(window.__qaSourceRequests||0)+1;const id='source'+count++;tasks.set(id,{end:Date.now()+1800,entry_id:p.entry_id});return {id,state:'running'};}
+ case 'metadata.get':{const track=tracks.find(t=>t.id===p.id);return track.metadata.automatic_review?copy(track.metadata):{values:{title:'Low (feat. T-Pain)',artist:'Flo Rida,T-Pain',album:'',date:'',genre:''},pending:{},artwork_path:null,source:null};}
+ case 'metadata.search':{const id='lookup'+count++;tasks.set(id,{lookup:true,end:Date.now()+2500});return {id,state:'running'};}
+ case 'metadata.save':{
+   if(window.__qaFailMetadataSave){window.__qaFailMetadataSave=false;throw new Error('Metadata save failed');}
+   await new Promise(resolve=>setTimeout(resolve,80));
+   window.__qaSavedSource=p.source;window.__qaMetadataSaves=[...(window.__qaMetadataSaves || []),{id:p.id,values:copy(p.values)}];
+   const track=tracks.find(t=>t.id===p.id);track.metadata={...track.metadata,values:p.values,pending:p.values,artwork_path:p.artwork_path,source:p.source};
+   return {metadata:copy(track.metadata)};
+ }
+ case 'metadata.job':{const found=tasks.get(p.id);if(found.scan){
+   if(window.__qaScanError)return {id:p.id,state:'failed',cancellable:true,result:null,error:window.__qaScanError};
+   if(found.cancelled)return {id:p.id,state:Date.now()-found.cancelled>150?'cancelled':'cancelling',cancellable:true,result:null};
+   if(window.__qaFinishScan){report.scan={offset:300,duration:1800,retry_at:0,automatic:true,running:true,stalled:false,fast:true,samples:7,pending_matches:2,progress:{stage:'Identifying tracks',completed:7,total:null,unit:'samples',position:360,duration:1800,tracks_found:2}};return {id:p.id,state:'completed',cancellable:true,result:copy(report)};}
+   return {id:p.id,state:'running',cancellable:true,progress:found.audio?{stage:'Identifying tracks',completed:7,total:null,unit:'samples',position:60,duration:3783,tracks_found:2}:{stage:'Reading playlist entries',completed:12,total:52,unit:'entries'}};
+ }if(found.lookup){return {id:p.id,state:Date.now()<found.end?'running':'completed',result:{query:{title:'Low',artist:'Flo Rida,T-Pain',version:''},candidates:[{provider:'Apple Music',recording_id:'275496141',release_id:'275496110',values:{title:'Low (feat. T-Pain)',artist:'Flo Rida',album:'Mail On Sunday',genre:'Hip-Hop/Rap',date:'2007-10-09'},duration:231.4,duration_difference:1.5,match_status:'strong',reasons:[]}]}};}
+const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running'};if(task.playback)return {id:p.id,state:'completed',result:{path:'/audio.wav'}};if(task.entry_id){const row=report.tracks.find(r=>r.entry_id===task.entry_id);row.download_id='dl'+row.entry_id;row.download_state='queued';}return {id:p.id,state:'completed',result:copy(report)};}
+ case 'sets.reorder':await new Promise(resolve=>setTimeout(resolve,150));report.tracks=p.entry_ids.map((id,position)=>({...report.tracks.find(row=>row.entry_id===id),position}));return copy(report);
+ case 'track.playback':case 'track.get':return copy(tracks.find(t=>t.id===p.id));
+ case 'playlists.save':{window.__qaSaves=(window.__qaSaves||0)+1;await new Promise(resolve=>setTimeout(resolve,150));if(window.__qaFailNext){window.__qaFailNext=false;throw new Error('Save failed');}playlist.track_ids=p.track_ids;localStorage.setItem('qaOrder',JSON.stringify(p.track_ids));return copy(playlist);}
+ default:throw new Error('Unhandled '+method);
+ }
+ }};
+ });
+ const checks={};const output=process.env.CRATELOOM_UI_OUTPUT || require('node:path').join(require('node:os').tmpdir(),'crateloom-workspace-check',engine);fs.mkdirSync(output,{recursive:true});
+ const wait=()=>page.waitForTimeout(250);
+ const order=()=>page.locator('.track-name strong').allTextContents();
+ async function drag(handle,row){const a=await handle.boundingBox(),b=await row.boundingBox();assert.ok(a&&b);await page.mouse.move(a.x+a.width/2,a.y+a.height/2);await page.mouse.down();await page.mouse.move(b.x+Math.min(b.width/2,120),b.y+b.height/2,{steps:12});await page.waitForTimeout(60);await page.mouse.up();await wait();}
+ await page.goto(baseUrl);
+ await page.getByRole('button',{name:'Collapse sidebar',exact:true}).click();await wait();
+ assert.equal(await page.locator('.sidebar').evaluate(el=>Math.round(el.getBoundingClientRect().width)),64);
+ assert.equal(await page.locator('.sidebar button[aria-label="Expand sidebar"]').count(),0);
+ assert.equal(await page.locator('.titlebar button[aria-label="Expand sidebar"]').count(),1);
+ await page.reload();await page.getByRole('button',{name:'Expand sidebar',exact:true}).click();await wait();
+ assert.equal(await page.locator('.sidebar').evaluate(el=>Math.round(el.getBoundingClientRect().width)),216);
+ checks.sidebar='titlebar toggle, collapsed preference survives reload';
+ await page.locator('.playlist-nav .nav').first().click();await wait();
+ assert.equal((await order())[0],'Low (feat. T-Pain)');
+ await drag(page.locator('.track-row .reorder-handle').first(),page.locator('.track-row').nth(2));
+ assert.deepEqual((await order()).slice(0,3),['The Days (Notion Remix)','Don\u2019t Stop the Music','Low (feat. T-Pain)']);
+ await page.getByRole('button',{name:'Move Low (feat. T-Pain) up',exact:true}).click();await wait();
+ assert.equal((await order())[1],'Low (feat. T-Pain)');
+ await page.getByRole('button',{name:'Reorder Low (feat. T-Pain). Use up or down arrow keys.',exact:true}).focus();await page.keyboard.press('ArrowUp');await wait();assert.equal((await order())[0],'Low (feat. T-Pain)');
+ await page.getByLabel('Search tracks',{exact:true}).fill('Low');await wait();
+ assert.deepEqual(await order(),['Low (feat. T-Pain)']);
+ await page.getByRole('button',{name:'Move Low (feat. T-Pain) down',exact:true}).click();await wait();
+ await page.getByLabel('Search tracks',{exact:true}).fill('');await wait();
+ assert.equal((await order())[1],'Low (feat. T-Pain)');
+ const saved=await order();await page.reload();await page.locator('.playlist-nav .nav').first().click();await wait();assert.deepEqual(await order(),saved);
+ await page.evaluate(()=>window.__qaFailNext=true);
+ await page.getByRole('button',{name:'Move Low (feat. T-Pain) up',exact:true}).click();await wait();assert.deepEqual(await order(),saved);
+ await page.getByRole('button',{name:'Dismiss',exact:true}).click();
+ await page.evaluate(()=>window.__qaStaleNext=true);await page.getByRole('button',{name:'Refresh library',exact:true}).click();await page.waitForFunction(()=>window.__qaStaleStarted);
+ await page.getByRole('button',{name:'Move Low (feat. T-Pain) up',exact:true}).click();await page.waitForTimeout(650);assert.equal((await order())[0],'Low (feat. T-Pain)');
+ checks.playlist='mouse drag, keyboard, buttons, filtered move, reload persistence, failed save rollback, stale refresh cannot revert order';
+ await page.getByRole('button',{name:'Edit metadata for Low (feat. T-Pain)',exact:true}).click();
+ await page.getByRole('button',{name:'Find matches',exact:true}).click();await page.waitForTimeout(500);
+ const candidate=page.locator('.metadata-match').first();assert.equal(await candidate.isEnabled(),true);await candidate.click();
+ await page.getByRole('button',{name:'Save to library',exact:true}).click();
+ await page.waitForFunction(()=>window.__qaSavedSource?.provider==='Apple Music');
+ assert.equal(await page.evaluate(()=>window.__qaSavedSource.provider),'Apple Music');
+ assert.equal(await page.getByRole('button',{name:'Find release cover',exact:true}).count(),1);
+ await wait();await page.screenshot({path:output+'/metadata-dark.png'});
+ checks.metadata='early match selectable during lookup; provider identity and fields save correctly';
+ await page.getByRole('button',{name:'Close metadata editor',exact:true}).click();
+ await page.getByRole('button',{name:'Import DJ Set',exact:true}).click();await page.getByRole('button',{name:'History',exact:true}).click();await page.locator('.set-history-open').click();await wait();
+ await drag(page.locator('.set-tracklist .reorder-handle').first(),page.locator('.set-tracklist > li').nth(2));
+ const setOrder=()=>page.locator('.set-track-info > strong').allTextContents();assert.equal((await setOrder())[2],'Low (feat. T-Pain)');
+ await page.getByRole('button',{name:'Move Low (feat. T-Pain) up',exact:true}).click();await wait();assert.equal((await setOrder())[1],'Low (feat. T-Pain)');
+ await page.getByRole('button',{name:'Reorder Low (feat. T-Pain). Use up or down arrow keys.',exact:true}).focus();await page.keyboard.press('ArrowUp');await wait();assert.equal((await setOrder())[0],'Low (feat. T-Pain)');
+ assert.deepEqual((await page.locator('.set-time').allTextContents()).slice(0,3),['01','02','03']);
+ await page.getByRole('button',{name:'Review sources \xb7 10',exact:true}).click();await page.getByRole('button',{name:'Use source',exact:true}).first().click();
+ await page.evaluate(()=>window.__qaStaleSetNext=true);await page.waitForFunction(()=>window.__qaStaleSetStarted);
+ await page.getByRole('button',{name:'Move Low (feat. T-Pain) down',exact:true}).click();await page.waitForTimeout(650);assert.equal((await setOrder())[1],'Low (feat. T-Pain)');
+ checks.set='mouse drag, keyboard, buttons, display numbering, stale background fetch cannot revert order';
+ await wait();await page.screenshot({path:output+'/set-dark.png'});
+ await page.getByLabel('Appearance').selectOption('light');await wait();await wait();await page.screenshot({path:output+'/set-light.png'});
+ await page.setViewportSize({width:900,height:650});await wait();await wait();await page.screenshot({path:output+'/compact-light.png'});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ await page.emulateMedia({reducedMotion:'reduce'});
+ await page.getByRole('button',{name:'Collapse sidebar',exact:true}).click();await wait();assert.equal(await page.locator('.sidebar').evaluate(el=>Math.round(el.getBoundingClientRect().width)),64);
+ checks.layouts='dark/light desktop, compact 900x650, reduced motion';
+
+ await page.getByRole('button',{name:'All Tracks',exact:true}).click();await page.setViewportSize({width:1280,height:900});await wait();
+ await page.getByRole('button',{name:'Expand sidebar',exact:true}).click();await wait();await page.getByLabel('Appearance').selectOption('dark');await wait();
+ const autoButton=page.getByRole('button',{name:/Auto metadata/});assert.match(await autoButton.innerText(),/5$/);
+ await page.locator('.track-row input[type=checkbox]').nth(0).check();await page.locator('.track-row input[type=checkbox]').nth(1).check();
+ assert.match(await autoButton.innerText(),/2$/);await autoButton.click();
+ assert.deepEqual(await page.evaluate(()=>window.__qaMetadataStarted),['t0','t1']);
+ assert.equal(await autoButton.isDisabled(),true);
+ await page.locator('.metadata-batch-progress progress').waitFor();
+ await wait();await page.screenshot({path:output+'/auto-metadata-running.png'});
+ await page.getByText('Metadata analysis complete',{exact:true}).waitFor();
+ assert.match(await page.locator('.metadata-batch-summary').innerText(),/1 applied with covers.*1 need review/);
+ await page.getByRole('button',{name:'Review results',exact:true}).click();
+ await page.getByText(/Applied automatically/).waitFor();
+ assert.equal(await page.getByLabel('Metadata album',{exact:true}).inputValue(),'Automatic album');
+ assert.equal(await page.locator('.metadata-match').count(),1);
+ assert.equal(await page.locator('.metadata-match').getAttribute('aria-pressed'),'true');
+ await page.waitForFunction(()=>{const image=document.querySelector('img[alt="Selected artwork"]');return image?.complete && image.naturalWidth>0;});
+ await wait();await page.screenshot({path:output+'/auto-metadata-review-dark.png'});
+ await page.getByRole('button',{name:'Save and next track',exact:true}).click();
+ await page.getByText('No usable album cover was found.',{exact:true}).waitFor();
+ await page.getByLabel('Metadata album',{exact:true}).fill('Reviewed second album');
+ await page.getByRole('button',{name:'Save and previous track',exact:true}).click();
+ await page.getByText(/Applied automatically/).waitFor();
+ assert.equal((await page.evaluate(()=>window.__qaMetadataSaves)).at(-1).id,'t1');
+ assert.equal((await page.evaluate(()=>window.__qaMetadataSaves)).at(-1).values.album,'Reviewed second album');
+ await page.evaluate(()=>window.__qaFailMetadataSave=true);
+ await page.getByRole('button',{name:'Save and next track',exact:true}).click();
+ await page.getByRole('alert').filter({hasText:'Metadata save failed'}).waitFor();
+ assert.equal(await page.getByLabel('Metadata album',{exact:true}).inputValue(),'Automatic album');
+ assert.match(await page.locator('.metadata-navigation').innerText(),/1 \/ 2/);
+ await page.getByRole('button',{name:'Save and next track',exact:true}).click();
+ await page.getByText('No usable album cover was found.',{exact:true}).waitFor();
+ assert.equal(await page.getByLabel('Metadata album',{exact:true}).inputValue(),'Reviewed second album');
+ await page.getByRole('button',{name:'Close metadata editor',exact:true}).click();
+ assert.equal(await page.locator('.panel-presence[data-state=closing] .metadata-window').count(),1);
+ await page.locator('.metadata-window').waitFor({state:'detached'});
+ await page.reload();await page.getByText('Metadata analysis complete',{exact:true}).waitFor();
+ await page.getByRole('button',{name:/^Review \d+$/}).click();await page.getByText(/Applied automatically/).waitFor();
+ await page.getByRole('button',{name:'Close metadata editor',exact:true}).click();
+ await page.getByLabel('Appearance').selectOption('light');await wait();
+ await page.setViewportSize({width:900,height:650});await wait();await page.screenshot({path:output+'/auto-metadata-complete-light.png'});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ if(await page.getByRole('button',{name:'Clear track selection',exact:true}).count())await page.getByRole('button',{name:'Clear track selection',exact:true}).click();
+ await page.getByLabel('Search tracks',{exact:true}).fill('Low');assert.match(await autoButton.innerText(),/1$/);
+ await page.getByLabel('Search tracks',{exact:true}).fill('');await page.evaluate(()=>window.__qaSlowMetadata=true);
+ await autoButton.click();await page.getByRole('button',{name:'Cancel analysis',exact:true}).click();
+ await page.getByText('Metadata analysis cancelled',{exact:true}).waitFor();
+ assert.equal(await autoButton.isEnabled(),true);
+ assert.match(await page.locator('.metadata-batch-progress').innerText(),/5 tracks left unchanged/);
+ checks.automaticMetadata='scope, progress, covers, saved review, previous/next save the correct track, failed save prevents navigation, closing presence, restart and cancellation';
+
+ await page.emulateMedia({reducedMotion:'no-preference'});
+ await page.locator('.track-name').first().click();await page.waitForFunction(()=>!document.querySelector('.transport .now').disabled);
+ await page.locator('.transport .now').click();await page.getByRole('heading',{name:'Cue Editor',exact:true}).waitFor();await page.waitForTimeout(450);
+ assert.equal(await page.locator('.editor .player-artwork').count(),1);
+ await wait();await page.screenshot({path:output+'/cue-editor-dark.png'});
+ await page.getByRole('button',{name:'Back to library',exact:true}).click();await page.locator('.transport .now').waitFor();await page.waitForTimeout(400);
+ checks.playerTransition='whole artwork/title/artist button opens cues, shared elements render, return to library succeeds';
+
+ await page.locator('.playlist-nav .nav').first().click();await wait();
+ await page.getByLabel('Appearance').selectOption('dark');
+ await page.getByRole('button',{name:'Export options',exact:true}).click();await wait();
+ const option=page.getByLabel('Include audio files',{exact:true});await option.check();
+ const checkboxSize=await option.boundingBox();assert.ok(checkboxSize.width<=20,JSON.stringify(checkboxSize));
+ await wait();await page.screenshot({path:output+'/library-toolbar-dark.png'});
+ await page.getByRole('button',{name:'Export options',exact:true}).click();
+ await page.setViewportSize({width:600,height:540});await page.getByRole('button',{name:'Collapse sidebar',exact:true}).click();await wait();
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ await wait();await page.screenshot({path:output+'/library-snapped-dark.png'});
+ await page.getByRole('button',{name:/^Review \d+$/}).click();await page.getByLabel('Metadata title',{exact:true}).waitFor();await wait();
+ const panelBounds=await page.locator('.metadata-window').boundingBox();assert.ok(panelBounds.x>=0 && panelBounds.x+panelBounds.width<=600 && panelBounds.y>=0 && panelBounds.y+panelBounds.height<=540,JSON.stringify(panelBounds));
+ await wait();await page.screenshot({path:output+'/metadata-snapped-dark.png'});
+ await page.getByRole('button',{name:'Close metadata editor',exact:true}).click();await page.locator('.metadata-window').waitFor({state:'detached'});
+ checks.toolbar='separate context and task groups, labeled export options, correctly sized checkbox, 600px snapped layout';
+
+ await page.setViewportSize({width:1280,height:900});
+ if(await page.getByRole('button',{name:'Expand sidebar',exact:true}).count())await page.getByRole('button',{name:'Expand sidebar',exact:true}).click();
+ await page.getByLabel('Appearance').selectOption('dark');
+ await page.getByRole('button',{name:'Import DJ Set',exact:true}).click();await page.getByRole('button',{name:'New scan',exact:true}).click();
+ await page.getByLabel('Mix or playlist link',{exact:true}).fill('https://www.youtube.com/watch?v=RvRhUHTV_8k');
+ await page.getByRole('button',{name:'Scan',exact:true}).click();await page.getByText('12 of 52 tracklist entries read',{exact:true}).waitFor();
+ const centered=async()=>page.locator('.set-progress-stage').evaluate(stage=>{const box=stage.getBoundingClientRect(),card=stage.querySelector('.scan-progress').getBoundingClientRect();return {x:Math.abs(box.x+box.width/2-card.x-card.width/2),y:Math.abs(box.y+box.height/2-card.y-card.height/2)};});
+ let alignment=await centered();assert.ok(alignment.x<2 && alignment.y<2,JSON.stringify(alignment));
+ assert.equal(await page.getByLabel('Mix or playlist link',{exact:true}).count(),1);
+ assert.equal(await page.getByLabel('Mix or playlist link',{exact:true}).isDisabled(),true);
+ await page.getByRole('button',{name:'History',exact:true}).click();await page.locator('.set-history-open').click();await page.locator('.set-report').waitFor();
+ assert.equal(await page.getByRole('button',{name:'Current set',exact:true}).isEnabled(),true);
+ assert.equal(await page.locator('.set-progress-stage').count(),0);
+ await page.getByRole('button',{name:'View scan',exact:true}).click();
+ await wait();await page.screenshot({path:output+'/tracklist-progress-dark.png'});
+ await page.getByRole('button',{name:'Cancel scan',exact:true}).click();await page.getByText(/^Scan cancelled\./).waitFor();
+ assert.equal(await page.getByLabel('Mix or playlist link',{exact:true}).inputValue(),'https://www.youtube.com/watch?v=RvRhUHTV_8k');
+ await page.getByText('Options',{exact:true}).click();await page.locator('.set-check input').check();
+ await page.getByRole('button',{name:'Scan',exact:true}).click();await page.getByText('7 audio samples checked',{exact:true}).waitFor();
+ assert.equal(await page.getByRole('progressbar',{name:'Scan progress',exact:true}).getAttribute('value'),null);
+ alignment=await centered();assert.ok(alignment.x<2 && alignment.y<2,JSON.stringify(alignment));
+ await page.getByLabel('Appearance').selectOption('light');await page.setViewportSize({width:900,height:650});await wait();
+ alignment=await centered();await wait();await page.screenshot({path:output+'/audio-progress-compact-light.png'});assert.ok(alignment.x<2 && alignment.y<2,JSON.stringify(alignment));
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ await page.getByRole('button',{name:'Cancel scan',exact:true}).click();await page.getByText(/^Scan cancelled\./).waitFor();
+ await page.getByRole('button',{name:'Scan',exact:true}).click();await page.evaluate(()=>window.__qaFinishScan=true);
+ await page.getByText('Scanning audio',{exact:true}).waitFor();await page.getByText('Saved through 05:00 of 30:00',{exact:true}).waitFor();
+ const cancelBounds=await page.getByRole('button',{name:'Cancel scan',exact:true}).boundingBox(),footerBounds=await page.locator('.transport').boundingBox();assert.ok(cancelBounds.y+cancelBounds.height<=footerBounds.y,JSON.stringify({cancelBounds,footerBounds}));
+ await wait();await page.screenshot({path:output+'/audio-continuation-light.png'});
+ await page.getByRole('button',{name:'Cancel scan',exact:true}).click();await page.getByRole('button',{name:'Resume audio scan',exact:true}).waitFor();
+ assert.match(await page.locator('.set-scan-status').innerText(),/7 saved audio samples.*2 matches kept/);
+ await page.getByRole('button',{name:'Resume audio scan',exact:true}).click();await page.getByRole('button',{name:'Cancel scan',exact:true}).click();
+ await page.getByRole('button',{name:'New scan',exact:true}).click();
+ await page.getByRole('button',{name:'Scan',exact:true}).click();
+ await page.getByRole('button',{name:'History',exact:true}).click();await page.evaluate(()=>window.__qaFinishScan=true);
+ await page.waitForTimeout(1200);assert.equal(await page.getByRole('button',{name:'History',exact:true}).getAttribute('aria-pressed'),'true');
+ assert.equal(await page.locator('.set-history-panel').count(),1);
+ await page.getByRole('button',{name:'Current set',exact:true}).click();
+ await page.getByRole('button',{name:'New scan',exact:true}).click();
+ await page.getByLabel('Mix or playlist link',{exact:true}).fill('https://www.youtube.com/watch?v=LTFCuhofnN8');
+ await page.evaluate(()=>{window.__qaScanError='YouTube requires age-verified access to this mix. Choose your signed-in browser under Options, then retry.';window.__qaFinishScan=false;});
+ await page.getByRole('button',{name:'Scan',exact:true}).click();
+ await page.getByRole('alert').filter({hasText:'YouTube requires age-verified access'}).waitFor();
+ await page.getByLabel('YouTube access',{exact:true}).waitFor({state:'visible'});
+ assert.equal(await page.getByRole('button',{name:'Options',exact:true}).getAttribute('aria-expanded'),'true');
+ assert.equal(await page.getByLabel('YouTube access',{exact:true}).inputValue(),'');
+ await page.getByLabel('YouTube access',{exact:true}).selectOption('chrome');
+ await page.evaluate(()=>window.__qaScanError=null);
+ await page.getByRole('button',{name:'Scan',exact:true}).click();
+ await page.getByRole('button',{name:'Cancel scan',exact:true}).waitFor();
+ assert.equal(await page.evaluate(()=>window.__qaLastScanParams.youtube_browser),'chrome');
+ await page.getByRole('button',{name:'Cancel scan',exact:true}).click();
+ checks.youtubeAccess='age error expands Options, public is the default, signed-in browser is explicitly selected and passed only to that scan';
+ checks.setScanning='tracklist/audio progress centered on desktop and compact layouts, initial scan cancellation, input preservation, honest unknown totals, automatic continuation cancellation, saved samples and Resume';
+ checks.errors=errors;assert.deepEqual(errors,[]);fs.writeFileSync(output+'/checks.json',JSON.stringify(checks,null,2));console.log(JSON.stringify(checks,null,2));await browser.close();
+})().catch(e=>{console.error(e);process.exit(1);});

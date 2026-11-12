@@ -1,3 +1,4 @@
+from contextlib import closing
 import json
 import math
 import os
@@ -79,9 +80,9 @@ class AnalysisJobs(unittest.TestCase):
                 self.assertEqual((restored['grid_bpm'],restored['grid_offset_us']),(130,10000))
                 # Replacing an older analyzer cache of the same stream preserves a fixed grid.
                 import sqlite3
-                with sqlite3.connect(root/'data'/'library.sqlite3') as db:
+                with closing(sqlite3.connect(root/'data'/'library.sqlite3')) as db:
                     detail=json.loads(db.execute('SELECT detail_analysis FROM tracks WHERE id=?',(t['id'],)).fetchone()[0]); detail['cache_key']='old-version-key'
-                    db.execute('UPDATE tracks SET detail_analysis=?,fixed_grid_key=?,grid_cache_key=?,offset_cache_key=? WHERE id=?',(json.dumps(detail),'old-version-key','old-version-key','old-version-key',t['id']))
+                    db.execute('UPDATE tracks SET detail_analysis=?,fixed_grid_key=?,grid_cache_key=?,offset_cache_key=? WHERE id=?',(json.dumps(detail),'old-version-key','old-version-key','old-version-key',t['id'])); db.commit()
                 upgraded=call('analysis.enqueue',{'id':t['id']})
                 self.assertEqual(upgraded['state'],'succeeded')
                 preserved=call('track.get',{'id':t['id']})

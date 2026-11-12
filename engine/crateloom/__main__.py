@@ -11,8 +11,11 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
-import xml.etree.ElementTree as ET
+from .structure_worker import MAX_DURATION as MAX_STRUCTURE_DURATION, MAX_SECTIONS
+from .fast_sections import VERSION as FAST_STRUCTURE_VERSION
 
 VERSION = '0.1.0'
 ROOT = Path(os.environ.get('CRATELOOM_DATA', Path.home() / '.crateloom'))
@@ -23,19 +26,29 @@ CACHE.mkdir(parents=True, exist_ok=True)
 ANALYSIS_VERSION = 'librosa-0.11.0-rgb-5'
 STRUCTURE_VERSION = 'allin1-infer-566f96c3-harmonix-all-v1'
 WORKERS = {}
+IMPORT_CONTEXT=threading.local()
 
-def connect():
-    db = sqlite3.connect(DB)
+class LibraryConnection(sqlite3.Connection):
+    def __exit__(self,*args):
+        try:return super().__exit__(*args)
+        finally:self.close()
+
+def connect_existing():
+    db = sqlite3.connect(DB,timeout=10,factory=LibraryConnection)
     db.row_factory = sqlite3.Row
     db.execute('PRAGMA foreign_keys=ON')
+    return db
+
+def connect():
+    db = connect_existing()
     version = db.execute('PRAGMA user_version').fetchone()[0]
-    if version > 8:
+    if version > 11:
         db.close()
         raise ValueError('Library was created by a newer CrateLoom version')
-    if 0 < version < 8:
+    if 0 < version < 11:
         # SQLite's backup API includes committed WAL data; keep the old library
         # before changing its schema so a development upgrade is reversible.
-        backup_path=ROOT / f'library-before-v8-{uuid.uuid4().hex}.sqlite3'
+        backup_path=ROOT / f'library-before-v11-{uuid.uuid4().hex}.sqlite3'
         backup_db=sqlite3.connect(backup_path)
         try:
             db.backup(backup_db)
@@ -65,19 +78,61 @@ def connect():
     if 'grid_bpm' not in columns: db.execute('ALTER TABLE tracks ADD COLUMN grid_bpm REAL')
     if 'grid_origin_us' not in columns: db.execute('ALTER TABLE tracks ADD COLUMN grid_origin_us INTEGER')
     if 'fixed_grid_key' not in columns: db.execute('ALTER TABLE tracks ADD COLUMN fixed_grid_key TEXT')
-    if version < 8:
-        db.execute('PRAGMA user_version=8')
+    if 'metadata' not in columns: db.execute('ALTER TABLE tracks ADD COLUMN metadata TEXT')
+    db.executescript('CREATE TABLE IF NOT EXISTS playlists(id TEXT PRIMARY KEY,name TEXT NOT NULL); CREATE TABLE IF NOT EXISTS playlist_tracks(playlist_id TEXT NOT NULL REFERENCES playlists(id),track_id TEXT NOT NULL REFERENCES tracks(id),position INTEGER NOT NULL,PRIMARY KEY(playlist_id,track_id));')
+    db.executescript('''CREATE TABLE IF NOT EXISTS acquisitions(
+        id TEXT PRIMARY KEY,state TEXT NOT NULL,stage TEXT NOT NULL,review TEXT NOT NULL,
+        created_at TEXT NOT NULL,updated_at TEXT NOT NULL,attempt INTEGER NOT NULL DEFAULT 1,
+        downloaded_bytes INTEGER NOT NULL DEFAULT 0,total_bytes INTEGER,track_id TEXT,
+        path TEXT,error TEXT,quality TEXT,duplicate INTEGER NOT NULL DEFAULT 0);
+        CREATE INDEX IF NOT EXISTS acquisitions_state ON acquisitions(state);
+        CREATE INDEX IF NOT EXISTS acquisitions_track ON acquisitions(track_id);
+        CREATE TABLE IF NOT EXISTS hidden_acquisition_history(id TEXT PRIMARY KEY REFERENCES acquisitions(id));''')
+    if version < 11:
+        db.execute('PRAGMA user_version=11')
+    db.executescript("""CREATE TABLE IF NOT EXISTS library_imports(id TEXT PRIMARY KEY,state TEXT NOT NULL,total INTEGER NOT NULL,current TEXT NOT NULL,error TEXT);
+    CREATE TABLE IF NOT EXISTS library_import_items(job_id TEXT NOT NULL REFERENCES library_imports(id),sequence INTEGER NOT NULL,path TEXT NOT NULL,state TEXT NOT NULL,track_id TEXT,error TEXT,PRIMARY KEY(job_id,sequence));""")
+    db.execute('CREATE INDEX IF NOT EXISTS tracks_audio_identity ON tracks(audio_hash,codec)')
+    from .set_import import schema as set_schema
+    set_schema(db)
     return db
+
+def check_import_cancel():
+    event=getattr(IMPORT_CONTEXT,'cancel',None)
+    if event and event.is_set():
+        from .library_imports import ImportCancelled
+        raise ImportCancelled()
+
+def import_process(args,timeout,*,process_group=False):
+    if not process_group and not getattr(IMPORT_CONTEXT,'cancel',None): return subprocess.run(args,capture_output=True,text=True,check=True,timeout=timeout)
+    proc=subprocess.Popen(args,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,start_new_session=process_group and os.name=='posix')
+    deadline=time.monotonic()+timeout
+    try:
+        while True:
+            check_import_cancel()
+            if time.monotonic()>deadline: raise subprocess.TimeoutExpired(args,timeout)
+            try:
+                out,err=proc.communicate(timeout=.1)
+                if proc.returncode: raise subprocess.CalledProcessError(proc.returncode,args,out,err)
+                return subprocess.CompletedProcess(args,proc.returncode,out,err)
+            except subprocess.TimeoutExpired: pass
+    finally:
+        if proc.poll() is None:
+            try:
+                if process_group and os.name=='posix':os.killpg(proc.pid,signal.SIGKILL)
+                else:proc.kill()
+            except ProcessLookupError:pass
+            proc.communicate()
 
 def file_hash(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as source:
         for block in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(block)
+            check_import_cancel(); digest.update(block)
     return digest.hexdigest()
 
 def audio_hash(path):
-    proc=subprocess.run(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-c','copy','-f','hash','-hash','sha256','-'],capture_output=True,text=True,check=True,timeout=600)
+    proc=import_process(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-c','copy','-f','hash','-hash','sha256','-'],600)
     line=proc.stdout.strip()
     if not line.startswith('SHA256=') or len(line) != 71:
         raise ValueError('Unable to verify the audio stream')
@@ -107,7 +162,7 @@ def verify_asset(db, t):
 def track(db, tid):
     row = db.execute('SELECT * FROM tracks WHERE id=?', (tid,)).fetchone()
     if row is None: raise ValueError('Track not found')
-    t = dict(row); t['missing'] = not Path(t['path']).is_file()
+    t = dict(row); t['metadata']=json.loads(t['metadata']) if t.get('metadata') else None; t['missing'] = not Path(t['path']).is_file()
     t['analysis'] = json.loads(t['analysis']) if t['analysis'] else None
     t['detail_analysis'] = json.loads(t['detail_analysis']) if t['detail_analysis'] else None
     t['structure_analysis'] = json.loads(t['structure_analysis']) if t['structure_analysis'] else None
@@ -121,13 +176,35 @@ def track(db, tid):
     return t
 
 def probe(path):
-    p = subprocess.run(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(path)],capture_output=True,text=True,check=True,timeout=30)
+    p = import_process(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(path)],30)
     data=json.loads(p.stdout); stream=next((s for s in data['streams'] if s.get('codec_type')=='audio'),None)
     if not stream: raise ValueError('No audio stream found')
     duration=float(data['format'].get('duration',0))
     if not 0 < duration < 86400: raise ValueError('Audio duration is invalid or exceeds 24 hours')
-    tags={k.lower():v for k,v in data['format'].get('tags',{}).items()}
+    tags={k.lower():v for k,v in {**stream.get('tags',{}),**data['format'].get('tags',{})}.items()}
     return duration,stream,tags
+
+def import_track(db, source):
+    path=Path(source).expanduser().resolve(strict=True)
+    if not path.is_file(): raise ValueError('Choose an audio file')
+    old=db.execute('SELECT id FROM tracks WHERE path=?',(str(path),)).fetchone()
+    if old:
+        existing=track(db,old['id']); verify_asset(db,existing);return track(db,old['id']),True
+    try:
+        duration,stream,tags=probe(path);digest=file_hash(path);signature=audio_hash(path)
+    except subprocess.CalledProcessError as error:
+        raise ValueError('Cannot read audio. The file may be damaged or unsupported.') from error
+    except subprocess.TimeoutExpired as error:
+        raise ValueError('Audio inspection timed out. Try importing this file again.') from error
+    old=db.execute('SELECT id FROM tracks WHERE audio_hash=? AND codec=? AND CAST(sample_rate AS INTEGER)=? AND abs(duration-?)<0.001 ORDER BY rowid LIMIT 1',(signature,stream.get('codec_name','unknown'),int(stream.get('sample_rate') or 0),duration)).fetchone()
+    if old:
+        existing=track(db,old['id'])
+        if not existing['missing']: verify_asset(db,existing)
+        return track(db,old['id']),True
+    check_import_cancel()
+    tid=str(uuid.uuid4())
+    db.execute('INSERT INTO tracks (id,path,title,artist,duration,codec,sample_rate,file_hash,analysis,audio_hash) VALUES (?,?,?,?,?,?,?,?,NULL,?)',(tid,str(path),tags.get('title') or path.stem,tags.get('artist',''),duration,stream.get('codec_name','unknown'),stream.get('sample_rate'),digest,signature))
+    return track(db,tid),False
 
 def atomic(path, data):
     path=Path(path); path.parent.mkdir(parents=True,exist_ok=True)
@@ -152,6 +229,10 @@ def stop_worker(proc):
 
 @atexit.register
 def stop_workers():
+    from .library_imports import shutdown
+    from .acquisitions import shutdown as stop_acquisitions
+    stop_acquisitions()
+    shutdown()
     for proc in list(WORKERS.values()):
         try: stop_worker(proc)
         except Exception: pass
@@ -175,8 +256,9 @@ def validate_analysis(data, expected_duration):
     return data
 
 def validate_structure(data, expected_duration):
-    if not isinstance(data,dict) or data.get('version')!=STRUCTURE_VERSION: raise ValueError('Unexpected structure analysis version')
-    if data.get('weight_license')!='CC-BY-NC-SA-4.0' or not isinstance(data.get('suggestions'),list) or len(data['suggestions'])>200: raise ValueError('Invalid structure output')
+    if not isinstance(data,dict) or data.get('version') not in (STRUCTURE_VERSION, FAST_STRUCTURE_VERSION): raise ValueError('Unexpected structure analysis version')
+    license = 'Not applicable' if data['version'] == FAST_STRUCTURE_VERSION else 'CC-BY-NC-SA-4.0'
+    if data.get('weight_license')!=license or not isinstance(data.get('suggestions'),list) or len(data['suggestions'])>MAX_SECTIONS: raise ValueError('Invalid structure output')
     for section in data['suggestions']:
         if not isinstance(section,dict) or type(section.get('start_us')) is not int or type(section.get('end_us')) is not int or not 0<=section['start_us']<section['end_us']<=round(expected_duration*1000000) or not isinstance(section.get('label'),str) or not 0<len(section['label'])<=80: raise ValueError('Invalid suggested section')
     return data
@@ -188,6 +270,21 @@ def grid_beats(t, data):
         first=math.ceil(-origin/interval); last=math.ceil((t['duration']-origin)/interval)
         return [round(origin+i*interval,6) for i in range(first,last) if 0<=origin+i*interval<t['duration']]
     return [round(beat+offset,6) for beat in data['beats'] if 0<=beat+offset<t['duration']]
+
+def preview_grid_beats(t, data):
+    from .beat_grid import complete_beats
+    return complete_beats(data['beats'],t['duration'],t['grid_bpm'] or data.get('tempo'),t['grid_origin_us']/1000000 if t['grid_origin_us'] is not None else None,t['grid_offset_us']/1000000)
+
+
+def save_auto_cues(db, t, data):
+    from .cue_rules import auto_cues
+    beats = grid_beats(t, data) if data else []
+    additions = auto_cues(beats, t['sections'], t['cues'], t['duration'])
+    colors = ['#ef5c86','#57b7ee','#9ccc51','#ae7cf5','#edac52','#5acbb7','#d885c3','#b3bec8']
+    db.executemany('INSERT INTO cues (track_id,slot,position_us,label,color) VALUES (?,?,?,?,?)',
+                   [(t['id'], c['slot'], c['position_us'], c['label'], colors[c['slot']]) for c in additions])
+    return len(additions)
+
 
 def store_analysis(db, asset, job_id, key, path, data, kind):
     db.execute('SAVEPOINT store_analysis')
@@ -227,6 +324,11 @@ def _store_analysis(db, asset, job_id, key, path, data, kind):
                 if fixed or any(abs(round(b*1000000)-asset['grid_anchor_us'])<=1000 for b in data['beats']):
                     db.execute('UPDATE tracks SET grid_cache_key=? WHERE id=?',(key,asset['id']))
         db.execute('UPDATE tracks SET detail_analysis=? WHERE id=?',(json.dumps(detail),asset['id']))
+        pending = db.execute('UPDATE dj_set_items SET cue_pending=0 WHERE track_id=? AND cue_pending=1', (asset['id'],))
+        if pending.rowcount:
+            t = track(db, asset['id'])
+            if not t['cues']:
+                save_auto_cues(db, t, data)
 
 def job_status(db, job_id):
     row = db.execute('SELECT * FROM jobs WHERE id=?', (job_id,)).fetchone()
@@ -244,9 +346,9 @@ def job_status(db, job_id):
                 try:
                     asset = track(db, job['track_id']); verify_asset(db, asset)
                     current = track(db, job['track_id'])
-                    key = cache_key(current, job['kind'])
-                    if key != job['cache_key']: raise ValueError('Audio changed while analysis was running')
                     data = json.loads(Path(job['output_path']).read_text())
+                    key = cache_key(current, job['kind'], data.get('version') == FAST_STRUCTURE_VERSION)
+                    if key != job['cache_key']: raise ValueError('Audio changed while analysis was running')
                     data = validate_structure(data,current['duration']) if job['kind']=='structure' else validate_analysis(data,current['duration'])
                     os.replace(job['output_path'], job['cache_path'])
                     store_analysis(db,current,job_id,key,job['cache_path'],data,job['kind'])
@@ -267,37 +369,90 @@ def job_status(db, job_id):
             shutil.rmtree(job['output_path']+'.work',ignore_errors=True)
     return {key: job[key] for key in ('id','track_id','state','stage','error','kind')}
 
-def cache_key(t, kind='beat'):
+def cache_key(t, kind='beat', fast=False):
     ffmpeg_version=subprocess.run(['ffmpeg','-version'],capture_output=True,text=True,check=True,timeout=10).stdout.splitlines()[0]
-    version=STRUCTURE_VERSION if kind=='structure' else ANALYSIS_VERSION
+    version=(FAST_STRUCTURE_VERSION if fast else STRUCTURE_VERSION) if kind=='structure' else ANALYSIS_VERSION
     text = f"{t['audio_hash']}:{t['codec']}:{t['sample_rate']}:{t['duration']}:{version}:{ffmpeg_version}"
     return hashlib.sha256(text.encode()).hexdigest()
 
 def dispatch(method, p):
     with connect() as db:
-        if method == 'system.shutdown': return {'stopping':True}
-        if method == 'handshake': return {'version':VERSION,'capabilities':['import','waveform','manual_cues','rekordbox_xml','analysis_jobs','beat_tracking','rgb_waveform','manual_sections','optional_structure_suggestions'],'semantic_analysis':bool(os.environ.get('CRATELOOM_STRUCTURE_PYTHON')),'analysis_python_configured':bool(os.environ.get('CRATELOOM_ANALYSIS_PYTHON'))}
+        if method == 'system.shutdown':
+            from .metadata_batch import shutdown as stop_metadata
+            stop_metadata()
+            from .library_imports import shutdown
+            from .acquisitions import shutdown as stop_acquisitions
+            from .set_import import AUTO_STOP, AUTO_WAKE
+            from .shazam_scan import shutdown as stop_shazam
+            AUTO_STOP.set()
+            AUTO_WAKE.set()
+            from .set_scan_jobs import shutdown as stop_set_scans
+            stop_set_scans()
+            stop_shazam(sys.modules[__name__])
+            stop_acquisitions();shutdown(); return {'stopping':True}
+        if method == 'handshake': return {'version':VERSION,'capabilities':['import','waveform','manual_cues','rekordbox_xml','analysis_jobs','beat_tracking','rgb_waveform','manual_sections','optional_structure_suggestions','source_review','direct_https_acquisition','persistent_download_queue'],'fast_sections':True,'semantic_analysis':bool(os.environ.get('CRATELOOM_STRUCTURE_PYTHON')),'structure_max_duration':MAX_STRUCTURE_DURATION,'analysis_python_configured':bool(os.environ.get('CRATELOOM_ANALYSIS_PYTHON'))}
+        if method.startswith(('playlists.','metadata.')):
+            from .preparation import dispatch as prepare
+            return prepare(sys.modules[__name__],db,method,p)
+        if method.startswith('providers.'):
+            from .providers import dispatch as provider_dispatch
+            return provider_dispatch(sys.modules[__name__],method,p)
+        if method.startswith('acquisitions.'):
+            from .acquisitions import dispatch as acquisition_dispatch
+            db.commit()
+            return acquisition_dispatch(sys.modules[__name__],method,p)
+        if method.startswith('sets.'):
+            from .set_import import dispatch as set_dispatch
+            return set_dispatch(sys.modules[__name__], db, method, p)
         if method == 'library.list': return [track(db,r['id']) for r in db.execute('SELECT id FROM tracks ORDER BY rowid DESC').fetchall()]
         if method == 'library.import':
+            result,duplicate=import_track(db,p['path']);return dict(result,duplicate=duplicate)
+        if method == 'track.relink':
+            t=track(db,p['id'])
+            if not t['missing']: raise ValueError('Only missing tracks can be relinked')
             path=Path(p['path']).expanduser().resolve(strict=True)
-            if not path.is_file(): raise ValueError('Choose an audio file')
-            old=db.execute('SELECT id FROM tracks WHERE path=?',(str(path),)).fetchone()
-            if old:
-                existing=track(db,old['id']); verify_asset(db,existing); return track(db,old['id'])
-            duration,stream,tags=probe(path)
-            digest=file_hash(path)
-            signature=audio_hash(path)
-            tid=str(uuid.uuid4()); db.execute('INSERT INTO tracks (id,path,title,artist,duration,codec,sample_rate,file_hash,analysis,audio_hash) VALUES (?,?,?,?,?,?,?,?,NULL,?)',(tid,str(path),tags.get('title') or path.stem,tags.get('artist',''),duration,stream.get('codec_name','unknown'),stream.get('sample_rate'),digest,signature))
-            return track(db,tid)
+            if db.execute('SELECT 1 FROM tracks WHERE path=? AND id!=?',(str(path),t['id'])).fetchone(): raise ValueError('That path already belongs to another library track')
+            digest=file_hash(path);duration,stream,_=probe(path)
+            matches=digest==t['file_hash'] if not t['audio_hash'] else audio_hash(path)==t['audio_hash']
+            if not matches or stream.get('codec_name')!=t['codec'] or int(stream.get('sample_rate') or 0)!=int(t['sample_rate'] or 0) or abs(duration-t['duration'])>.001: raise ValueError('The selected file does not match the original audio. Cues were kept unchanged.')
+            db.execute('UPDATE tracks SET path=?,file_hash=? WHERE id=?',(str(path),digest,t['id']))
+            return track(db,t['id'])
+        if method.startswith('imports.'):
+            from . import library_imports
+            api=sys.modules[__name__]
+            if method=='imports.start':
+                paths=p.get('paths',[]);folder=p.get('folder')
+                if not isinstance(paths,list) or len(paths)>5000 or any(not isinstance(x,str) for x in paths) or (folder is not None and not isinstance(folder,str)) or (not paths and not folder): raise ValueError('Choose audio files or a folder')
+                # Commit schema before the background thread opens its connection.
+                db.commit();return library_imports.start(api,paths,folder)
+            if method=='imports.get':return library_imports.status(api,p['id'],p.get('cursor',0))
+            if method=='imports.cancel':return library_imports.cancel(api,p['id'])
+            if method=='imports.latest':
+                row=db.execute('SELECT id FROM library_imports ORDER BY rowid DESC LIMIT 1').fetchone()
+                return library_imports.status(api,row['id'],p.get('cursor',0)) if row else None
         if method in ('analysis.enqueue','structure.enqueue'):
             kind='structure' if method=='structure.enqueue' else 'beat'
-            asset=track(db,p['id']); verify_asset(db,asset); asset=track(db,p['id'])
+            fast = kind == 'structure' and p.get('mode') == 'fast'
+            asset=track(db,p['id'])
+            automatic = kind=='structure' and p.get('automatic') is True
+            python=os.environ.get('CRATELOOM_STRUCTURE_PYTHON' if kind=='structure' else 'CRATELOOM_ANALYSIS_PYTHON')
+            if fast:
+                python = (os.environ.get('CRATELOOM_ANALYSIS_PYTHON') or shutil.which('python3')) if getattr(sys, 'frozen', False) else sys.executable
+            if automatic and (asset['missing'] or asset['structure_analysis'] or asset['duration']>MAX_STRUCTURE_DURATION
+                              or not python or not Path(python).is_file()):
+                return None
             if kind=='beat' and asset['duration']>900: raise ValueError('Beat analysis currently supports tracks up to 15 minutes.')
-            if kind=='structure' and asset['duration']>300: raise ValueError('Structure analysis currently supports tracks up to 5 minutes.')
+            if kind=='structure' and asset['duration']>MAX_STRUCTURE_DURATION: raise ValueError('Structure analysis currently supports tracks up to 30 minutes.')
             for existing in db.execute("SELECT id FROM jobs WHERE state IN ('queued','running')").fetchall():
                 current=job_status(db,existing['id'])
-                if current['state'] in ('queued','running'): raise ValueError('Another analysis is running. Wait or cancel it first.')
-            key=cache_key(asset,kind); cache=CACHE / (key + '.json'); job_id=str(uuid.uuid4())
+                if current['state'] in ('queued','running'):
+                    if automatic and current['track_id']==asset['id'] and current['kind']==kind:
+                        return current
+                    raise ValueError('Another analysis is running. Wait or cancel it first.')
+            verify_asset(db,asset); asset=track(db,p['id'])
+            if automatic and asset['structure_analysis']:
+                return None
+            key=cache_key(asset,kind,fast); cache=CACHE / (key + '.json'); job_id=str(uuid.uuid4())
             status=CACHE / (job_id + '.status.json'); output=CACHE / (job_id + '.partial.json')
             force=p.get('force',False)
             if type(force) is not bool: raise ValueError('Invalid force setting')
@@ -309,11 +464,12 @@ def dispatch(method, p):
                     db.execute('INSERT INTO jobs (id,track_id,state,stage,status_path,output_path,cache_path,cache_key,error,kind) VALUES (?,?,?,?,?,?,?,?,NULL,?)',(job_id,asset['id'],'succeeded','Using cached analysis',str(status),str(output),str(cache),key,kind))
                     return job_status(db,job_id)
                 except (OSError,ValueError,KeyError,json.JSONDecodeError): pass
-            python=os.environ.get('CRATELOOM_STRUCTURE_PYTHON' if kind=='structure' else 'CRATELOOM_ANALYSIS_PYTHON')
             if not python or not Path(python).is_file():
                 raise ValueError('Structure model unavailable. Run scripts/setup-structure-macos.sh and restart the app.' if kind=='structure' else 'Beat analysis is unavailable. Run scripts/setup-analysis-macos.sh and restart the app.')
             env=os.environ.copy(); env['PYTHONPATH']=str(Path(__file__).resolve().parent.parent)
-            module='crateloom.structure_worker' if kind=='structure' else 'crateloom.analysis_worker'
+            if fast and asset['detail_analysis']:
+                env['CRATELOOM_FAST_BEAT_CACHE'] = asset['detail_analysis']['cache_path']
+            module='crateloom.fast_sections' if fast else 'crateloom.structure_worker' if kind=='structure' else 'crateloom.analysis_worker'
             proc=subprocess.Popen([python,'-m',module,asset['path'],str(output),str(status),str(asset['duration'])],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=(os.name=='posix'))
             WORKERS[job_id]=proc
             try:
@@ -337,16 +493,19 @@ def dispatch(method, p):
             if not result['missing']: verify_asset(db,result)
             result=track(db,p['id'])
             return result
+        if method == 'track.playback':
+            return track(db, p['id'])
+        if method == 'playback.prepare':
+            from .playback import prepare
+            from .preparation import launch
+            asset = track(db, p['id'])
+            return launch(lambda: prepare(sys.modules[__name__], asset))
         if method == 'cues.auto':
-            from .cue_rules import auto_cues
             t=track(db,p['id']); verify_asset(db,t); t=track(db,p['id'])
             if not t['detail_analysis'] and not t['sections']: raise ValueError('Analyze the track first')
             data=json.loads(Path(t['detail_analysis']['cache_path']).read_text()) if t['detail_analysis'] else None
-            beats=grid_beats(t,data) if data else []
-            additions=auto_cues(beats,t['sections'],t['cues'],t['duration'])
-            colors=['#ef5c86','#57b7ee','#9ccc51','#ae7cf5','#edac52','#5acbb7','#d885c3','#b3bec8']
-            db.executemany('INSERT INTO cues (track_id,slot,position_us,label,color) VALUES (?,?,?,?,?)',[(t['id'],c['slot'],c['position_us'],c['label'],colors[c['slot']]) for c in additions])
-            return {'track':track(db,t['id']),'added':len(additions),'has_sections':bool(t['sections']),'free_slots':8-len(t['cues'])}
+            added=save_auto_cues(db,t,data)
+            return {'track':track(db,t['id']),'added':added,'has_sections':bool(t['sections']),'free_slots':8-len(t['cues'])}
         if method == 'cues.propose':
             from .cue_rules import propose
             t=track(db,p['id']); verify_asset(db,t)
@@ -365,7 +524,7 @@ def dispatch(method, p):
             if anchor is not None:
                 if type(anchor) is not int or not 0<=anchor+offset<round(t['duration']*1000000): raise ValueError('Invalid bar 1')
                 data=json.loads(Path(detail['cache_path']).read_text()); candidate=dict(t,grid_bpm=bpm,grid_origin_us=origin,grid_offset_us=offset)
-                if not any(abs(round(b*1000000)-offset-anchor)<=1000 for b in grid_beats(candidate,data)): raise ValueError('Bar 1 must match the grid')
+                if not any(abs(round(b*1000000)-offset-anchor)<=1000 for b in preview_grid_beats(candidate,data)): raise ValueError('Bar 1 must match the grid')
             db.execute('UPDATE tracks SET grid_bpm=?,grid_origin_us=?,fixed_grid_key=?,grid_anchor_us=?,grid_cache_key=?,grid_offset_us=?,offset_cache_key=? WHERE id=?',(bpm,origin,detail['cache_key'] if bpm is not None else None,anchor,detail['cache_key'] if anchor is not None else None,offset,detail['cache_key'],t['id']))
             return track(db,t['id'])
         if method == 'grid.fixed':
@@ -391,12 +550,12 @@ def dispatch(method, p):
             else:
                 if type(anchor) is not int or not 0<=anchor+t['grid_offset_us']<round(t['duration']*1000000) or not detail: raise ValueError('Analyze beats before setting bar 1')
                 data=json.loads(Path(detail['cache_path']).read_text())
-                if not any(abs(round(beat*1000000)-t['grid_offset_us']-anchor)<=1000 for beat in grid_beats(t,data)): raise ValueError('Bar 1 must be on a detected beat')
+                if not any(abs(round(beat*1000000)-t['grid_offset_us']-anchor)<=1000 for beat in preview_grid_beats(t,data)): raise ValueError('Bar 1 must be on a grid beat')
                 db.execute('UPDATE tracks SET grid_anchor_us=?,grid_cache_key=? WHERE id=?',(anchor,detail['cache_key'],t['id']))
             return track(db,t['id'])
         if method == 'sections.save':
             t=track(db,p['id']); verify_asset(db,t); sections=p['sections']
-            if not isinstance(sections,list) or len(sections)>200: raise ValueError('Expected at most 200 sections')
+            if not isinstance(sections,list) or len(sections)>MAX_SECTIONS: raise ValueError(f'Expected at most {MAX_SECTIONS} sections')
             prior_end=0; checked=[]; ids=set()
             for section in sorted(sections,key=lambda x:x['start_us']):
                 sid=section['id']; start=section['start_us']; end=section['end_us']; label=section['label']; origin=section.get('origin','manual')
@@ -434,30 +593,21 @@ def dispatch(method, p):
             db.execute('DELETE FROM cues WHERE track_id=?',(t['id'],))
             db.executemany('INSERT INTO cues (track_id,slot,position_us,label,color) VALUES (?,?,?,?,?)',[(t['id'],c['slot'],c['position_us'],c['label'],c.get('color')) for c in cues])
             return track(db,t['id'])
-        if method == 'export.rekordbox':
-            t=track(db,p['id'])
-            source=verify_asset(db,t).resolve()
-            dest=Path(p['path']).expanduser().resolve()
-            backup=dest.with_suffix('.crateloom.json')
-            if backup.exists(): raise ValueError('Cue backup already exists; choose a new export name to avoid overwriting it')
-            protected={Path(r['path']).resolve() for r in db.execute('SELECT path FROM tracks')}
-            if dest.suffix.lower() != '.xml' or dest in protected or backup in protected: raise ValueError('Choose an XML destination separate from all library audio')
-            root=ET.Element('DJ_PLAYLISTS',Version='1.0.0'); ET.SubElement(root,'PRODUCT',Name='CrateLoom',Version=VERSION,Company='CrateLoom')
-            collection=ET.SubElement(root,'COLLECTION',Entries='1')
-            loc=source.as_uri().replace('file:///','file://localhost/',1)
-            item=ET.SubElement(collection,'TRACK',TrackID='1',Name=t['title'],Artist=t['artist'],TotalTime=str(int(t['duration'])),Location=loc)
-            for c in t['cues']:
-                attrs={'Name':c['label'],'Type':'0','Start':f"{c['position_us']/1_000_000:.6f}",'Num':str(c['slot'])}
-                if c.get('color'):
-                    color=c['color']; attrs.update(Red=str(int(color[1:3],16)),Green=str(int(color[3:5],16)),Blue=str(int(color[5:7],16)))
-                ET.SubElement(item,'POSITION_MARK',**attrs)
-            lists=ET.SubElement(root,'PLAYLISTS'); node=ET.SubElement(lists,'NODE',Type='0',Name='ROOT',Count='1'); playlist=ET.SubElement(node,'NODE',Type='1',Name='CrateLoom',KeyType='0',Entries='1'); ET.SubElement(playlist,'TRACK',Key='1')
-            xml=ET.tostring(root,encoding='utf-8',xml_declaration=True)
-            atomic(backup,json.dumps({'format_version':1,'track':t},ensure_ascii=False,indent=2).encode()); atomic(dest,xml)
-            return {'xml':str(dest),'backup':str(backup)}
+        if method in ('export.rekordbox','export.enqueue'):
+            from .rekordbox_export import export
+            api = sys.modules[__name__]
+            if method == 'export.rekordbox':
+                return export(api,db,p)
+            from .preparation import launch
+            def run_export():
+                with connect() as worker_db:
+                    return export(api,worker_db,p)
+            return launch(run_export)
         raise ValueError('Unknown method')
 
 def main():
+    from .set_import import start_auto_scans
+    start_auto_scans(sys.modules[__name__])
     for line in sys.stdin.buffer:
         req={}
         try:

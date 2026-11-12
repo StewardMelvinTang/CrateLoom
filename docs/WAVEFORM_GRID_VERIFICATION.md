@@ -1,0 +1,32 @@
+# Waveform grid, scrubbing and beat jump — 2026-11-04
+
+## Changes
+
+`beat-grid.ts` completes the preview grid before the first detected beat, across dropped detections, and after the last detection. Existing detected positions are preserved. Fixed BPM/origin edits continue to take precedence. Completion uses the median detected interval (or the available BPM for a single detection) and does not rewrite analysis files. The Python `beat_grid.py` counterpart allows a user-confirmed bar-1 anchor on the same completed grid; anchor validation and frontend completion are covered by a parity test. Automatic cue generation continues to use actual detected beats, not inferred intro/outro beats.
+
+Quarter-note beat lines are white/gray; every fourth beat has a stronger bar line, bar number and red boundary triangles. Other beats have smaller gray boundary ticks. Bar lines continue before a manually chosen bar 1. Until a user sets bar 1, the displayed 4/4 phase is provisional and the compact counter reads `Bar ~N.B`; confirming bar 1 removes `~`. This does not add a downbeat estimator or infer a different meter. At very wide zoom, the grid displays bars, then groups of bars, when individual beats cannot fit at five-pixel spacing; zooming in restores each beat. Viewport selection uses binary search rather than scanning all beats each frame.
+
+Pointer and trackpad movement coalesces into `requestAnimationFrame` callbacks. Scratch preview uses the existing AudioWorklet while the media element stays paused; the final position is committed as one seek when the gesture ends. This avoids repeatedly asking the media decoder to seek during a drag. Cancellation commits the latest preview and restores the prior playback state. Mouse wheel zoom and trackpad scrubbing/pinch behavior remain separate. Playback uses display-frame interpolation of the media clock, with seeks, buffering and drift bounds rebased to the real media time. There is no fixed 60 Hz frame timer; actual cadence depends on the display, browser/WebKit and system load.
+
+Waveform rendering retains a resize observer instead of recreating it every frame, precomputes RGB palette strings, and uses a signed min/max envelope pyramid for larger ranges. Arbitrary ranges preserve exact sample minima/maxima; small ranges scan source data directly. Drawing reuses its range-result storage. Playlist/library filtering and keyboard-listener registration no longer repeat their work on every transport frame.
+
+Beat jump defaults to `< 16 beats >`, with persisted choices of ¼, ½, 1, 2, 4, 8, 16, 32 and 64 beats. It uses the completed beat timeline, preserving off-beat phase and following variable beat intervals instead of multiplying one global BPM. Both directions clamp at track boundaries, preserve pause/play state, and move an active seconds-based loop without changing its width. Shift+Left/Right also jump while the editor is active, excluding text/select/dialog editing.
+
+## Validation
+
+- Python suite: 29 tests run, 27 passed, two optional model/analysis integrations skipped because their environment variables were unset. The configured tag writer's existing fixture checks passed.
+- Node suite: 13 tests passed. New checks cover intro/gap/outro completion, fixed-grid offsets, variable timing, backend/frontend parity, fractional and reversible beat jumps, boundaries, exact signed envelope ranges, coarse media-clock interpolation at simulated 120 Hz, playback-rate changes, seeks and stalls. Existing wheel classification and scrub-DSP tests remain green.
+- TypeScript and production build passed; `git diff --check` passed.
+- Rendered-app interaction used the actual React app and Python engine with a temporary localhost bridge and an isolated generated 32-second audio library. It checked grid lines before the first detection and in the outro, beat/bar styles, centered playhead, paused fractional jumps, jumps during playback, mouse dragging, trackpad scrubbing, mouse zoom, keyboard jumps, active-loop jumps, and bar-1 confirmation/reset. No uncaught page errors occurred. Sixty pointer-move steps caused zero media seeks during the drag and one after release. Playback produced 119 visual updates over two seconds on a measured ~16.7 ms browser frame cadence.
+- A copied real `GO!` MP3 and copied analysis cache were checked separately. Its detected beats run from 13.397914s to 151.800454s in a 167.462313s file. The completed intro viewport showed 26 lines, including seven bar markers, before the first detected beat. Dark 1440×900 and light 900×650 views were inspected; the transport controls did not overflow horizontally. The owner track, cues and original cache were not edited.
+- A local synthetic 300-second/2400-column range-query microbenchmark measured approximately 2.15→0.17 ms at 1×, 0.21→0.13 ms at 16× and 0.05→0.09 ms at 128×. This excludes canvas paint, React, audio and compositing; it is not an end-to-end FPS claim. Small-range overhead at high zoom is tiny but not claimed as a speedup.
+
+The rendered interaction test ran in headless Microsoft Edge through Playwright with a test-only Tauri-call bridge. It validates application behavior but does not establish native WebKit sustained frame rate, physical trackpad feel, exact rekordbox scratch-audio equivalence, Windows behavior, or measured performance on 120/144 Hz hardware. The display-frame clock has a simulated 120 Hz regression test; physical high-refresh validation remains an owner test.
+
+## Owner check
+
+Open GO! or another analyzed track. Inspect the intro, a breakdown and the outro; verify beat lines and stronger four-beat markers persist. Zoom in to inspect all beats. Set bar 1 on a known downbeat and check the counter and bar phase, including earlier audio. Compare a 16-beat forward/back jump while paused and playing; try ½ and 4 beats and Shift+Left/Right. Drag with the mouse, scrub with two fingers, and pinch to zoom. Check that releasing a scrub resumes only if the track was playing before it. Test on the intended refresh-rate setting and listen for scratch feel/decoder alignment before accepting the change.
+
+## Reference
+
+The distinction between beat grid lines, first-beat bar markers and directional beat jumps follows the official [rekordbox manual](https://cdn.rekordbox.com/files/20251202174516/rekordbox7.2.8_manual_EN.pdf), especially the enlarged-waveform/grid and beat-jump sections. This implementation is independent; exact parity with proprietary rendering/DSP is not claimed.

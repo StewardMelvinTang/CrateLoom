@@ -4,10 +4,60 @@ import math
 from importlib.metadata import distribution
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from .analysis_worker import write_json
 
 VERSION = 'allin1-infer-566f96c3-harmonix-all-v1'
+MAX_DURATION = 30 * 60
+MAX_SECTIONS = 1024
+WINDOW_SECONDS = 180
+CONTEXT_SECONDS = 12
+
+
+def analyze_sections(session, source, work, status, duration):
+    count = math.ceil(duration / WINDOW_SECONDS) if duration > 300 else 1
+    window = math.ceil(duration / count)
+    allowed = {'intro','verse','chorus','bridge','outro','break','instrumental','solo','other'}
+    segments = []
+    for i in range(count):
+        start = i * window
+        end = min(duration, start + window) if count > 1 else duration
+        offset = max(0, start - CONTEXT_SECONDS)
+        clip = source
+        stage = 'Separating and analyzing sections'
+        if count > 1:
+            stage = f'Analyzing sections · {i + 1}/{count}'
+            clip = work / f'window-{i}.wav'
+        write_json(status, {'state':'running', 'stage':stage})
+        if count > 1:
+            clip_end = min(duration, end + CONTEXT_SECONDS)
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-ss', str(offset), '-i', str(source),
+                            '-t', str(clip_end - offset), '-map', '0:a:0', '-ac', '2', '-ar', '44100',
+                            str(clip)], check=True, capture_output=True, timeout=120)
+        result = session.infer(clip, demix_dir=str(work/'demix'), spec_dir=str(work/'spec'),
+                               keep_byproducts=False, multiprocess=False)
+        if count > 1:
+            clip.unlink()
+        for seg in sorted(result.segments, key=lambda item: item.start):
+            label = str(seg.label).lower()
+            if label == 'inst':
+                label = 'instrumental'
+            if label not in allowed or not math.isfinite(seg.start) or not math.isfinite(seg.end):
+                continue
+            left = round(max(start, offset + seg.start) * 1e6)
+            right = round(min(end, offset + seg.end) * 1e6)
+            if segments:
+                left = max(left, segments[-1]['end_us'])
+            if right <= left:
+                continue
+            if i and segments and left == round(start * 1e6) == segments[-1]['end_us'] and label.title() == segments[-1]['label']:
+                segments[-1]['end_us'] = right
+            else:
+                segments.append({'start_us':left,'end_us':right,'label':label.title()})
+    if len(segments) > MAX_SECTIONS:
+        raise ValueError('Model returned too many sections')
+    return segments
 
 def run(source, output, status, expected_duration):
     write_json(status, {'state':'running', 'stage':'Loading structure model'})
@@ -23,27 +73,22 @@ def run(source, output, status, expected_duration):
             raise RuntimeError('Structure environment does not match the tested lock. Run scripts/setup-structure-macos.sh')
     if distribution('torch').version != '2.15.0':
         raise RuntimeError('Structure environment does not match the tested lock. Run scripts/setup-structure-macos.sh')
-    import allin1_infer
+    from allin1_infer import AllInOneSession
     work=Path(output+'.work')
     work.mkdir(parents=True,exist_ok=True)
     try:
-        write_json(status, {'state':'running', 'stage':'Separating and analyzing sections'})
-        result=allin1_infer.analyze(source,device='cpu',demix_dir=str(work/'demix'),spec_dir=str(work/'spec'),keep_byproducts=False)
         duration=float(expected_duration)
-        allowed={'intro','verse','chorus','bridge','outro','break','instrumental','solo','other'}
-        segments=[]
-        for seg in result.segments:
-            label=str(seg.label).lower(); start=float(seg.start); end=float(seg.end)
-            if label not in allowed or not math.isfinite(start) or not math.isfinite(end): continue
-            start=max(0.0,start); end=min(duration,end)
-            if end <= start: continue
-            segments.append({'start_us':round(start*1e6),'end_us':round(end*1e6),'label':label.title()})
-        segments.sort(key=lambda s:s['start_us'])
-        if len(segments)>200: raise ValueError('Model returned too many sections')
+        if not 0 < duration <= MAX_DURATION:
+            raise ValueError('Structure analysis supports tracks up to 30 minutes.')
+        with AllInOneSession(device='cpu') as session:
+            segments=analyze_sections(session, source, work, status, duration)
+        warnings=['Machine-generated labels and boundaries require review.']
+        if duration > 300:
+            warnings.append('Sections on long tracks are estimated in overlapping windows.')
         write_json(output,{'version':VERSION,'duration':duration,'suggestions':segments,
                            'model':'All-In-One harmonix-all via all-in-one-infer',
                            'weight_license':'CC-BY-NC-SA-4.0',
-                           'warnings':['Machine-generated labels and boundaries require review.']})
+                           'warnings':warnings})
         write_json(status,{'state':'succeeded','stage':'Complete'})
     finally:
         shutil.rmtree(work,ignore_errors=True)

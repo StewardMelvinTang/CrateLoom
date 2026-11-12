@@ -1,3 +1,4 @@
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -135,9 +136,9 @@ class Flow(unittest.TestCase):
             self.assertEqual(response['result']['cues'],[{'slot':0,'position_us':250000,'label':'Existing'}])
             self.assertEqual(response['result']['sections'],[])
             self.assertIsNotNone(response['result']['audio_hash'])
-            with sqlite3.connect(data/'library.sqlite3') as verify:
-                self.assertEqual(verify.execute('PRAGMA user_version').fetchone()[0],8)
-            backups=list(data.glob('library-before-v8-*.sqlite3')); self.assertEqual(len(backups),1)
-            with sqlite3.connect(backups[0]) as backup:
+            with closing(sqlite3.connect(data/'library.sqlite3')) as verify:
+                self.assertEqual(verify.execute('PRAGMA user_version').fetchone()[0],11)
+            backups=list(data.glob('library-before-v11-*.sqlite3')); self.assertEqual(len(backups),1)
+            with closing(sqlite3.connect(backups[0])) as backup:
                 self.assertEqual(backup.execute('PRAGMA user_version').fetchone()[0],2)
                 self.assertEqual(backup.execute('SELECT label FROM cues').fetchone()[0],'Existing')

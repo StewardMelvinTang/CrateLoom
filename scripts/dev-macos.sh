@@ -14,6 +14,12 @@ fi
 if [ -z "${CRATELOOM_STRUCTURE_PYTHON:-}" ] && [ -x "$HOME/Library/Caches/CrateLoom/structure-env/bin/python" ]; then
   export CRATELOOM_STRUCTURE_PYTHON="$HOME/Library/Caches/CrateLoom/structure-env/bin/python"
 fi
+if [ -z "${CRATELOOM_METADATA_PYTHON:-}" ] && [ -x "$HOME/Library/Caches/CrateLoom/metadata-env/bin/python" ]; then
+  export CRATELOOM_METADATA_PYTHON="$HOME/Library/Caches/CrateLoom/metadata-env/bin/python"
+fi
+if [ -z "${CRATELOOM_SHAZAM_PYTHON:-}" ] && [ -x "$HOME/Library/Caches/CrateLoom/shazam-env/bin/python" ]; then
+  export CRATELOOM_SHAZAM_PYTHON="$HOME/Library/Caches/CrateLoom/shazam-env/bin/python"
+fi
 DEV_PORT="${CRATELOOM_DEV_PORT:-1420}"
 case "$DEV_PORT" in ''|*[!0-9]*) echo 'CRATELOOM_DEV_PORT must be a numeric port.' >&2; exit 1;; esac
 if [ "$DEV_PORT" -lt 1024 ] || [ "$DEV_PORT" -gt 65535 ]; then echo 'CRATELOOM_DEV_PORT must be between 1024 and 65535.' >&2; exit 1; fi
