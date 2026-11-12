@@ -8,11 +8,21 @@ import urllib.parse
 import urllib.error
 import uuid
 
-from . import download_http, preparation, service_links, youtube_audio
+from . import download_http, playlist_sources, preparation, service_links, youtube_audio
 from .metadata_matching import search_identity, query_plan, rank_candidates
 
 CANDIDATES = {}
 LOCK = threading.Lock()
+CANDIDATE_TTL = 3600
+MAX_CANDIDATES = 250
+# A set prepare registers a source and its references for every entry before it
+# queues them, so recent entries are only dropped at a limit sized for a full set.
+CANDIDATE_HOLD = 900
+CANDIDATE_LIMIT = MAX_CANDIDATES + 20 * playlist_sources.MAX_ENTRIES
+# MusicBrainz allows one request per second; the lock paces every caller in turn.
+MUSICBRAINZ_LOCK = threading.Lock()
+MUSICBRAINZ_INTERVAL = 1.1
+LAST_MUSICBRAINZ_REQUEST = 0
 
 
 def capabilities(api):
@@ -33,10 +43,13 @@ def register(api, candidate):
     with LOCK:
         now = time.monotonic()
         for key in list(CANDIDATES):
-            if now-CANDIDATES[key]['at'] > 3600:
+            if now-CANDIDATES[key]['at'] > CANDIDATE_TTL:
                 CANDIDATES.pop(key)
-        while len(CANDIDATES) >= 250:
-            CANDIDATES.pop(next(iter(CANDIDATES)))
+        while len(CANDIDATES) >= MAX_CANDIDATES:
+            oldest = next(iter(CANDIDATES))
+            if len(CANDIDATES) < CANDIDATE_LIMIT and now-CANDIDATES[oldest]['at'] < CANDIDATE_HOLD:
+                break
+            CANDIDATES.pop(oldest)
         cid = str(uuid.uuid4())
         candidate = dict(candidate, id=cid)
         CANDIDATES[cid] = {'root': str(api.ROOT), 'at': now, 'value': candidate}
@@ -46,19 +59,20 @@ def register(api, candidate):
 def get(api, cid, kind):
     with LOCK:
         item = CANDIDATES.get(cid)
-        if not item or item['root'] != str(api.ROOT) or time.monotonic()-item['at'] > 3600 or item['value']['kind'] != kind:
+        if not item or item['root'] != str(api.ROOT) or time.monotonic()-item['at'] > CANDIDATE_TTL or item['value']['kind'] != kind:
             raise ValueError('Source review expired. Find the source again.')
         return dict(item['value'])
 
 
 def musicbrainz(path, params):
-    with preparation.LOCK:
+    global LAST_MUSICBRAINZ_REQUEST
+    with MUSICBRAINZ_LOCK:
         url = 'https://musicbrainz.org/ws/2/' + path + '?' + urllib.parse.urlencode(params)
         for attempt in range(2):
-            delay = 1.1-(time.monotonic()-preparation.LAST_REQUEST)
+            delay = MUSICBRAINZ_INTERVAL-(time.monotonic()-LAST_MUSICBRAINZ_REQUEST)
             if delay > 0:
                 time.sleep(delay)
-            preparation.LAST_REQUEST = time.monotonic()
+            LAST_MUSICBRAINZ_REQUEST = time.monotonic()
             try:
                 return json.loads(preparation.request(url))
             except urllib.error.HTTPError as error:

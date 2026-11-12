@@ -14,7 +14,7 @@ import time
 import uuid
 from urllib.parse import urlsplit
 
-from . import download_http, providers, preparation, soundcloud_download, youtube_audio
+from . import download_http, playlist_sources, providers, preparation, soundcloud_download, youtube_audio
 from .library_imports import ImportCancelled
 from .metadata_matching import normalized
 
@@ -22,6 +22,9 @@ MANAGERS = {}
 MANAGER_LOCK = threading.Lock()
 ACTIVE = ('queued','downloading','verifying','importing','cancelling')
 TERMINAL_RETRY = ('failed','cancelled','interrupted')
+QUEUE_CAPACITY = 25
+# Preparing a set may queue every entry of a playlist; retries stay within the same bound.
+SET_CAPACITY = playlist_sources.MAX_ENTRIES + QUEUE_CAPACITY
 WORKER_COUNT = 4
 PER_SOURCE = 3
 RANGE_SIZE = 512 * 1024
@@ -270,7 +273,7 @@ class Manager(AudioTransfer):
         self.ensure_worker()
         return self.get(jid)
 
-    def enqueue_in(self, db, params, *, capacity=25):
+    def enqueue_in(self, db, params, *, capacity=QUEUE_CAPACITY):
         source = providers.get(self.api, params.get('source_id'), 'direct')
         reference = providers.get(self.api, params['reference_id'], 'reference') if params.get('reference_id') else None
         fields = params.get('values',{})
@@ -317,7 +320,7 @@ class Manager(AudioTransfer):
             row = db.execute('SELECT state FROM acquisitions WHERE id=?',(jid,)).fetchone()
             if row is None or row['state'] not in TERMINAL_RETRY:
                 raise ValueError('Only a failed, cancelled or interrupted download can be retried')
-            if db.execute("SELECT count(*) FROM acquisitions WHERE state IN ('queued','downloading','verifying','importing','cancelling')").fetchone()[0] >= 25:
+            if db.execute("SELECT count(*) FROM acquisitions WHERE state IN ('queued','downloading','verifying','importing','cancelling')").fetchone()[0] >= SET_CAPACITY:
                 raise ValueError('The download queue is full. Wait or cancel a queued item.')
             db.execute("UPDATE acquisitions SET state='queued',stage='Queued',attempt=attempt+1,downloaded_bytes=0,error=NULL,path=NULL,quality=NULL,track_id=NULL,duplicate=0,updated_at=? WHERE id=?",(now(),jid))
         self.ensure_worker()
@@ -476,7 +479,7 @@ class Manager(AudioTransfer):
                 check()
                 db.execute("UPDATE acquisitions SET state='completed',stage=?,track_id=?,path=?,quality=?,duplicate=?,updated_at=? WHERE id=?",('Already in library' if duplicate else 'Imported',track['id'],track['path'],json.dumps(quality),int(duplicate),now(),jid))
                 from .set_import import attach_download
-                attach_download(db, jid, track['id'], duplicate)
+                attach_download(db, jid, track['id'], duplicate, api=api)
             committed = True
         except ImportCancelled:
             interrupted = self.closing.is_set()

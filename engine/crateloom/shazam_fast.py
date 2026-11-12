@@ -49,9 +49,12 @@ def timeline(start, end, samples):
 
 
 def decode(source, at):
-    result = subprocess.run(['ffmpeg','-nostdin','-v','error','-ss',str(at),'-i',str(source),
-                             '-t',str(WINDOW),'-map','0:a:0','-ac','1','-ar',str(RATE),'-f','s16le','-'],
-                            capture_output=True,check=True,timeout=30)
+    try:
+        result = subprocess.run(['ffmpeg','-nostdin','-v','error','-ss',str(at),'-i',str(source),
+                                 '-t',str(WINDOW),'-map','0:a:0','-ac','1','-ar',str(RATE),'-f','s16le','-'],
+                                capture_output=True,check=True,timeout=30)
+    except subprocess.SubprocessError:
+        raise ValueError('FFmpeg could not decode the mix audio.') from None
     return wav_bytes(result.stdout) if len(result.stdout)>=MIN_TAIL*RATE*2 else None
 
 

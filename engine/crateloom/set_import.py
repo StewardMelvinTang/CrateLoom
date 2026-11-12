@@ -518,6 +518,11 @@ def get_set(db, sid):
 
 
 def delete_report(db, sid):
+    get_set(db,sid)
+    control = set_scan_jobs.for_database(db,sid)
+    if control:
+        # Stop the scan before its report disappears; its thread then ends as cancelled.
+        control.cancel()
     db.execute('BEGIN IMMEDIATE')
     get_set(db,sid)
     for table in ('dj_set_scan_work','dj_set_auto_scan','dj_set_scan','dj_set_items','dj_set_youtube_access','dj_set_history','dj_sets'):
@@ -561,9 +566,17 @@ def store_scan_plan(db, sid, plan):
         ON CONFLICT(set_id) DO UPDATE SET plan=excluded.plan""",(sid,json.dumps(plan)))
 
 
-def resume_scan(api, sid):
+def release_backoff(db, sid):
+    # An explicit resume waits for Shazam's own cooldown at most, not the automatic stall backoff.
+    db.execute('UPDATE dj_set_scan SET retry_at=min(retry_at,?) WHERE set_id=?',
+               (time.time()+shazam_scan.RATE_LIMIT_COOLDOWN,sid))
+
+
+def resume_scan(api, sid, *, manual=False):
     with api.connect() as db:
         saved = get_set(db,sid)
+        if manual:
+            release_backoff(db,sid)
         state = scan_checkpoint(db,saved)
         access = db.execute('SELECT browser FROM dj_set_youtube_access WHERE set_id=?',(sid,)).fetchone()
     control = set_scan_jobs.current()
@@ -595,6 +608,8 @@ def resume_scan(api, sid):
         warning = 'Scan stopped. Completed matches and audio samples were kept.'
     with api.connect() as db:
         db.execute('BEGIN IMMEDIATE')
+        if control and control.stop.is_set() and not db.execute('SELECT 1 FROM dj_sets WHERE id=?',(sid,)).fetchone():
+            raise ImportCancelled('Scan cancelled')
         if scan_checkpoint(db,get_set(db,sid)) != state:
             raise ValueError('This scan has already moved forward. Reopen the saved report.')
         tail = db.execute('SELECT position,detail FROM dj_set_items WHERE set_id=? ORDER BY position DESC LIMIT 1', (sid,)).fetchone()
@@ -641,6 +656,7 @@ def set_auto_scan(db, sid, enabled):
     if enabled:
         db.execute('INSERT OR IGNORE INTO dj_set_scan VALUES (?,?,?,?,?)',
                    (sid,state['offset'],state['duration'],state['path'],state['retry_at']))
+        release_backoff(db,sid)
         queue_auto_scan(db,sid,saved['watch'])
     else:
         db.execute('UPDATE dj_set_auto_scan SET enabled=0 WHERE set_id=?',(sid,))
@@ -655,7 +671,7 @@ def cancel_scan(api, db, sid):
     db.execute('INSERT INTO dj_set_auto_scan(set_id,enabled) SELECT set_id,0 FROM dj_set_scan WHERE set_id=? ON CONFLICT(set_id) DO UPDATE SET enabled=0',(sid,))
     db.commit()
     control = set_scan_jobs.for_report(api,sid)
-    if control:
+    if control and not control.stop.is_set():
         control.cancel()
     AUTO_WAKE.set()
     result = report(db,sid)
@@ -697,6 +713,11 @@ def auto_scan_step(api):
         return False
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         error = str(exc)
+        offset = job['offset']
+    except Exception:
+        # A malformed worker reply counts as a stalled attempt. It must not
+        # end the continuation thread for every other saved set.
+        error = 'The audio scan stopped unexpectedly.'
         offset = job['offset']
     finally:
         AUTO_RUNNING = None
@@ -808,7 +829,7 @@ def report(db, sid):
     return result
 
 
-def attach_track(db, sid, position, tid, *, cue_pending=False):
+def attach_track(db, sid, position, tid, *, cue_pending=False, api=None):
     playlist = get_set(db, sid)['playlist_id']
     db.execute('UPDATE dj_set_items SET track_id=?,error=NULL,cue_pending=? WHERE set_id=? AND position=?',
                (tid, cue_pending, sid, position))
@@ -817,15 +838,17 @@ def attach_track(db, sid, position, tid, *, cue_pending=False):
                (playlist, tid, position))
     item = json.loads(db.execute('SELECT detail FROM dj_set_items WHERE set_id=? AND position=?', (sid, position)).fetchone()[0])
     if item.get('artwork_path') and Path(item['artwork_path']).is_file():
-        from . import __main__ as api
+        if api is None:
+            # Engine callers pass the running module; under ``python -m`` this import would load a second copy.
+            from . import __main__ as api
         from .set_artwork import apply
         apply(api, db, tid, item['artwork_path'])
 
 
-def attach_download(db, download_id, track_id, duplicate):
+def attach_download(db, download_id, track_id, duplicate, *, api=None):
     row = db.execute('SELECT set_id,position FROM dj_set_items WHERE download_id=?', (download_id,)).fetchone()
     if row:
-        attach_track(db, row['set_id'], row['position'], track_id, cue_pending=not duplicate)
+        attach_track(db, row['set_id'], row['position'], track_id, cue_pending=not duplicate, api=api)
 
 
 def add_local(api, sid, entry_id, path):
@@ -842,7 +865,7 @@ def add_local(api, sid, entry_id, path):
             raise ValueError('This set entry is already linked or unavailable.')
         track, duplicate = api.import_track(db, path)
         db.execute('UPDATE dj_set_items SET download_id=NULL WHERE set_id=? AND position=?', (sid, position))
-        attach_track(db, sid, position, track['id'], cue_pending=not duplicate)
+        attach_track(db, sid, position, track['id'], cue_pending=not duplicate, api=api)
         return report(db, sid)
 
 
@@ -896,6 +919,12 @@ def reference_for(api, item, identity):
     return next(iter(exact.values())) if len(exact) == 1 else None
 
 
+def add_link(item, label, url):
+    links = item.setdefault('links', [])
+    if not any(link.get('url') == url for link in links):
+        links.append({'label': label, 'url': url})
+
+
 def source_for(api, item, explicit_url, watch=None):
     if explicit_url:
         platform = service_links.identify(explicit_url)
@@ -910,7 +939,13 @@ def source_for(api, item, explicit_url, watch=None):
                 raise ValueError('This source has no downloadable audio. Add a direct track link or local file.')
         return {'source_id': source['id'], 'values': {'title': item['title'], 'artist': item['artist']},
                 'artwork_path': item.get('artwork_path')}, None
-    if not explicit_url and item['at'] is None and item['listed_links']:
+    if item.get('links'):
+        # Earlier prepares may have stored the same link more than once.
+        unique = {}
+        for link in item['links']:
+            unique.setdefault(link.get('url'), link)
+        item['links'] = list(unique.values())
+    if item['at'] is None and item['listed_links']:
         page = service_links.identify(item['listed_links'][0])
         if page and page[0] in youtube_audio.NAMES:
             try:
@@ -933,7 +968,7 @@ def source_for(api, item, explicit_url, watch=None):
         except ValueError as error:
             lookup_error = str(error)
     if reference:
-        item.setdefault('links', []).append({'label': 'MusicBrainz', 'url': reference['source_url']})
+        add_link(item, 'MusicBrainz', reference['source_url'])
     free_links = []
     for type_id, url in catalog_links:
         try:
@@ -944,18 +979,18 @@ def source_for(api, item, explicit_url, watch=None):
         if type_id == FREE_DOWNLOAD:
             free_links.append(url)
         if platform:
-            item.setdefault('links', []).append({'label': platform[0], 'url': platform[1]})
+            add_link(item, platform[0], platform[1])
             if platform[0] == 'SoundCloud' and soundcloud_download.configured():
                 free_links.append(platform[1])
         elif type_id == FREE_DOWNLOAD:
-            item.setdefault('links', []).append({'label': 'Creator download', 'url': download_http.display_url(url)})
-    urls = [explicit_url] if explicit_url else [*item['listed_links'], *free_links] if not item.get('needs_review') else []
-    if not explicit_url and not item.get('needs_review') and soundcloud_download.configured() and not any('soundcloud.com/' in url for url in urls):
+            add_link(item, 'Creator download', download_http.display_url(url))
+    urls = [*item['listed_links'], *free_links] if not item.get('needs_review') else []
+    if not item.get('needs_review') and soundcloud_download.configured() and not any('soundcloud.com/' in url for url in urls):
         try:
             found = soundcloud_download.find(item['artist'], item['title'], key, item.get('duration'))
             if found:
                 urls.append(found)
-                item.setdefault('links', []).append({'label': 'SoundCloud', 'url': found})
+                add_link(item, 'SoundCloud', found)
         except ValueError as error:
             lookup_error = str(error)
     source = None
@@ -963,44 +998,31 @@ def source_for(api, item, explicit_url, watch=None):
         try:
             platform = service_links.identify(download_http.public_url(url))
             if platform and platform[2] == watch:
-                raise ValueError('Choose the individual track link instead of the full DJ set.')
+                continue
             if platform and platform[0] == 'SoundCloud':
                 source = soundcloud_source(api, platform[1])
                 break
-            if explicit_url:
-                resolved = providers.resolve(api, url)
-                source = next((c for c in resolved['candidates'] if c['kind'] == 'direct'), None)
-                if source is None:
-                    raise ValueError('This page does not expose a download. Paste a direct audio file URL.')
-                values = source.get('values') or {}
-                source_key = (normalized(values.get('artist', '')), normalized(values.get('title', '')), normalized(source.get('version', '')))
-                for artist, title in credit_options(item):
-                    if key(artist, title) == source_key:
-                        item.update(artist=artist, title=title, credit_confirmed=True)
-                        break
-            else:
-                # Only the official free-file route or an inline creator file is eligible automatically.
-                url = download_http.public_url(url)
-                if platform and platform[0] in youtube_audio.NAMES and platform[2] != watch and url in item['listed_links']:
-                    resolved, _, _ = youtube_audio.resolve(api, platform)
-                    source = providers.register(api, resolved)
-                    break
-                if platform:
-                    continue
-                info = download_http.inspect(url)
-                source = providers.register(api, dict(info, kind='direct', provider='Direct HTTPS', can_acquire=True))
+            # Only the official free-file route or an inline creator file is eligible automatically.
+            url = download_http.public_url(url)
+            if platform and platform[0] in youtube_audio.NAMES and url in item['listed_links']:
+                resolved, _, _ = youtube_audio.resolve(api, platform)
+                source = providers.register(api, resolved)
+                break
+            if platform:
+                continue
+            info = download_http.inspect(url)
+            source = providers.register(api, dict(info, kind='direct', provider='Direct HTTPS', can_acquire=True))
             break
-        except (ValueError, OSError) as error:
-            if explicit_url:
-                raise ValueError(str(error)) from None
-    if source is None and not explicit_url:
+        except (ValueError, OSError):
+            pass
+    if source is None:
         try:
             source, video_error = find_video_source(api, item, watch)
             if video_error:
                 lookup_error = video_error
         except ValueError as error:
             lookup_error = str(error)
-    if source is None and not explicit_url:
+    if source is None:
         try:
             source = find_soundcloud_source(api, item)
         except ValueError as error:
@@ -1053,7 +1075,7 @@ def prepare_set(api, sid, name, override=None):
                 db.execute('BEGIN IMMEDIATE')
                 current = db.execute('SELECT position,track_id,download_id FROM dj_set_items WHERE set_id=? AND rowid=?', (sid, entry_id)).fetchone()
                 if current and not current['track_id'] and not current['download_id']:
-                    attach_track(db, sid, current['position'], match)
+                    attach_track(db, sid, current['position'], match, api=api)
             continue
         lookups.append((entry_id,item))
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix='set-source') as pool:
@@ -1075,12 +1097,15 @@ def prepare_set(api, sid, name, override=None):
                         item['artwork_path'] = latest['artwork_path']
                         if params:
                             params['artwork_path'] = latest['artwork_path']
-                    jid = manager.enqueue_in(db, params, capacity=playlist_sources.MAX_ENTRIES + 25) if params else None
+                    jid = manager.enqueue_in(db, params, capacity=acquisitions.SET_CAPACITY) if params else None
                     db.execute('UPDATE dj_set_items SET detail=?,download_id=?,error=? WHERE set_id=? AND position=?',
                                (json.dumps(item), jid or current['download_id'], error, sid, slot['position']))
                 if jid:
                     manager.ensure_worker()
-            except (ValueError, OSError) as error:
+            except Exception as error:
+                # One entry's lookup must not fail the whole preparation.
+                if not isinstance(error, (ValueError, OSError)):
+                    error = ValueError('This source could not be checked. Try again.')
                 with api.connect() as db:
                     db.execute('BEGIN IMMEDIATE')
                     slot = db.execute('SELECT position FROM dj_set_items WHERE set_id=? AND rowid=?', (sid, entry_id)).fetchone()
@@ -1123,17 +1148,24 @@ def dispatch(api, db, method, p):
             raise ValueError('Invalid automatic scan setting.')
         return set_auto_scan(db,p.get('id'),enabled)
     if method == 'sets.cancel_task':
+        with set_scan_jobs.LOCK:
+            control = set_scan_jobs.CONTROLS.get(p.get('task_id'))
         task = set_scan_jobs.cancel(p.get('task_id'))
         saved = task.get('result')
-        if saved and saved.get('scan') and saved['scan']['offset'] is not None:
-            task['result']=cancel_scan(api,db,saved['id'])
+        if not saved and control:
+            # The worker may have saved its report without having published it to the job yet.
+            with control.lock:
+                saved = control.result
+        stopped = saved['id'] if saved and saved.get('scan') and saved['scan']['offset'] is not None else control.report_id if control else None
+        if stopped and db.execute('SELECT 1 FROM dj_sets WHERE id=?',(stopped,)).fetchone():
+            task['result']=cancel_scan(api,db,stopped)
         return task
     if method == 'sets.cancel_scan':
         return cancel_scan(api,db,p.get('id'))
     if method == 'sets.resume_scan':
         sid = p.get('id')
         get_set(db,sid)
-        return set_scan_jobs.start(api,lambda:resume_scan(api,sid),sid)
+        return set_scan_jobs.start(api,lambda:resume_scan(api,sid,manual=True),sid)
     if method == 'sets.scan':
         url, path, pasted = p.get('url', ''), p.get('path'), p.get('tracklist', '')
         recognize = p.get('fingerprint', False)
@@ -1201,7 +1233,13 @@ def dispatch(api, db, method, p):
             best = recommend_sources(item)
             if best:
                 entry_id, url = row['entry_id'], best['url']
-                task = preparation.launch(lambda eid=entry_id, link=url: prepare_set(api, sid, None, (eid, link)))
+                try:
+                    task = preparation.launch(lambda eid=entry_id, link=url: prepare_set(api, sid, None, (eid, link)))
+                except ValueError:
+                    # The request queue is full. Report what started; the rest stay eligible.
+                    if not tasks:
+                        raise
+                    break
                 tasks.append({'entry_id': str(entry_id), **task})
         return tasks
     if method == 'sets.prepare':
@@ -1229,9 +1267,14 @@ def dispatch(api, db, method, p):
         path, pos = p.get('path'), p.get('position')
         if p.get('entry_id') is not None:
             slot = db.execute('SELECT position FROM dj_set_items WHERE set_id=? AND rowid=?', (sid, p['entry_id'])).fetchone()
-            pos = slot['position'] if slot else None
+            if not slot:
+                raise ValueError('Set entry not found.')
+            pos = slot['position']
         if not isinstance(path, str) or not path or type(pos) is not int:
             raise ValueError('Choose a local audio file for a set entry.')
-        entry_id = db.execute('SELECT rowid FROM dj_set_items WHERE set_id=? AND position=?', (sid, pos)).fetchone()[0]
+        entry = db.execute('SELECT rowid FROM dj_set_items WHERE set_id=? AND position=?', (sid, pos)).fetchone()
+        if not entry:
+            raise ValueError('Set entry not found.')
+        entry_id = entry[0]
         return preparation.launch(lambda: add_local(api, sid, entry_id, path))
     raise ValueError('Unknown set import method.')

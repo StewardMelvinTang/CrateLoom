@@ -15,7 +15,6 @@ MIN_TAIL = 6
 MAX_DURATION = 3 * 60 * 60
 REQUEST_INTERVAL = 2
 RATE_LIMIT_COOLDOWN = 90
-BATCH_SECONDS = 120
 
 
 def report_progress(progress, partial):
@@ -64,7 +63,7 @@ def add_match(hits, start, length, result):
         hits.append(dict(key=key, start=start, end=end, title=title, artist=artist, samples=1))
 
 
-async def scan(source, duration, offset=0, batch_seconds=BATCH_SECONDS):
+async def scan(source, duration, offset=0, batch_seconds=MAX_DURATION):
     from aiohttp_retry import ExponentialRetry
     from shazamio import Shazam
     from shazamio.client import HTTPClient
@@ -118,7 +117,7 @@ async def scan(source, duration, offset=0, batch_seconds=BATCH_SECONDS):
 if __name__ == '__main__':
     try:
         offset = float(sys.argv[3]) if len(sys.argv) > 3 else 0
-        batch_seconds = int(sys.argv[4]) if len(sys.argv) > 4 else BATCH_SECONDS
+        batch_seconds = int(sys.argv[4]) if len(sys.argv) > 4 else MAX_DURATION
         if len(sys.argv) > 5 and sys.argv[5] == 'fast':
             from .shazam_fast import scan as scan_fast
             result = scan_fast(Path(sys.argv[1]),float(sys.argv[2]),offset,json.load(sys.stdin))
@@ -127,4 +126,7 @@ if __name__ == '__main__':
         print(json.dumps(asyncio.run(result)))
     except (ValueError, OSError, ImportError) as error:
         print(str(error), file=sys.stderr)
+        raise SystemExit(1)
+    except subprocess.SubprocessError:
+        print('FFmpeg could not decode the mix audio.', file=sys.stderr)
         raise SystemExit(1)

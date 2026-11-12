@@ -46,11 +46,16 @@ class ScanControl:
             self.publisher({'stage': stage, 'progress': dict(self.progress)})
 
     def cancel(self, closing=False):
+        from .preparation import JOBS
         with self.lock:
             if not self.stop.is_set():
                 self.closing = closing
             self.stop.set()
-            self.publisher({'state': 'cancelling', 'stage': 'Stopping scan'})
+            # A job that already finished keeps its final state; overwriting it
+            # would leave the scan shown as stopping forever.
+            job = JOBS.get(self.job_id)
+            if job is None or job.get('state') in ('running', 'cancelling'):
+                self.publisher({'state': 'cancelling', 'stage': 'Stopping scan'})
 
     @contextmanager
     def activate(self):

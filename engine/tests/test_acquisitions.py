@@ -127,6 +127,17 @@ class Acquisitions(unittest.TestCase):
         self.assertEqual(api.dispatch('library.list',{}),[]);self.assertFalse((self.root/'downloads').exists())
         with patch.object(download_http,'open_url',side_effect=lambda *a,**k:Response(self.audio)):
             retried=api.dispatch('acquisitions.retry',{'id':failed['id']});done=self.finish(retried['id']);self.assertEqual(done['state'],'completed',done);self.assertEqual(done['attempt'],2)
+    def test_retry_is_not_refused_while_a_set_prepare_fills_the_queue(self):
+        manager=acquisitions.manager(api)
+        with patch.object(manager,'ensure_worker'):
+            failed=self.enqueue()
+            with api.connect() as db:
+                db.execute("UPDATE acquisitions SET state='failed' WHERE id=?",(failed['id'],))
+                for _ in range(acquisitions.QUEUE_CAPACITY+5):
+                    manager.enqueue_in(db,{'source_id':self.source['id'],'values':{'title':'Set entry'}},capacity=acquisitions.SET_CAPACITY)
+            with self.assertRaisesRegex(ValueError,'queue is full'):self.enqueue()
+            retried=api.dispatch('acquisitions.retry',{'id':failed['id']})
+            self.assertEqual((retried['state'],retried['attempt']),('queued',2))
     def test_parallel_queue_bounds_active_jobs_and_cancels_without_partial_imports(self):
         gate=threading.Event()
         with patch.object(download_http,'open_url',side_effect=lambda *a,**k:Response(self.audio,gate=gate)):
@@ -277,6 +288,44 @@ class ProviderContracts(unittest.TestCase):
         with self.assertRaises(ValueError):providers.get(API,source['id'],'reference')
         providers.CANDIDATES[source['id']]['at']-=3601
         with self.assertRaises(ValueError):providers.get(API,source['id'],'direct')
+    def test_recent_reviews_survive_a_large_set_prepare(self):
+        class API:ROOT=Path('/registry')
+        with patch.dict(providers.CANDIDATES,{},clear=True):
+            first=providers.register(API,{'kind':'direct','url':'https://artist.example/first.wav'})
+            for index in range(providers.MAX_CANDIDATES*2):providers.register(API,{'kind':'reference','duration':index})
+            self.assertEqual(providers.get(API,first['id'],'direct')['url'],'https://artist.example/first.wav')
+            for item in providers.CANDIDATES.values():item['at']-=providers.CANDIDATE_HOLD+1
+            providers.register(API,{'kind':'reference'})
+            self.assertEqual(len(providers.CANDIDATES),providers.MAX_CANDIDATES)
+            with self.assertRaises(ValueError):providers.get(API,first['id'],'direct')
+        with patch.dict(providers.CANDIDATES,{},clear=True),patch.object(providers,'CANDIDATE_LIMIT',providers.MAX_CANDIDATES+10):
+            for index in range(providers.MAX_CANDIDATES+40):providers.register(API,{'kind':'reference','duration':index})
+            self.assertEqual(len(providers.CANDIDATES),providers.MAX_CANDIDATES+10)
+    def test_musicbrainz_requests_are_paced_and_serve_text_search(self):
+        from crateloom import preparation
+        class API:ROOT=Path('/musicbrainz')
+        recording={'id':'11111111-1111-4111-8111-111111111111','title':'Song','length':200000,'score':100,'artist-credit':[{'name':'Artist'}],
+                   'releases':[{'id':'22222222-2222-4222-8222-222222222222','title':'Album','status':'Official'}]}
+        urls=[];sleeps=[];clock=[100.0]
+        def request(url,*args,**kwargs):urls.append(url);return json.dumps({'recordings':[recording]}).encode()
+        def sleep(seconds):sleeps.append(seconds);clock[0]+=seconds
+        fake=SimpleNamespace(monotonic=lambda:clock[0],sleep=sleep)
+        with patch.dict(providers.CANDIDATES,{},clear=True),patch.object(preparation,'request',side_effect=request),patch.object(providers,'time',fake),patch.object(providers,'LAST_MUSICBRAINZ_REQUEST',0):
+            data=providers.musicbrainz('recording/'+recording['id'],{'inc':'url-rels','fmt':'json'})
+            self.assertEqual(data['recordings'][0]['id'],recording['id'])
+            self.assertTrue(urls[0].startswith('https://musicbrainz.org/ws/2/recording/'+recording['id']+'?inc=url-rels'))
+            self.assertEqual(sleeps,[])
+            found=providers.recording_search(API,'Artist - Song')
+            self.assertAlmostEqual(sleeps[0],providers.MUSICBRAINZ_INTERVAL)
+            reference=found['candidates'][0]
+            self.assertEqual((reference['kind'],reference['recording_id'],reference['values']['artist']),('reference',recording['id'],'Artist'))
+            self.assertEqual(providers.get(API,reference['id'],'reference')['release_id'],recording['releases'][0]['id'])
+            self.assertEqual(providers.resolve(API,'Artist - Song')['kind'],'references')
+            self.assertEqual(len(sleeps),len(urls)-1)
+            failure=urllib.error.HTTPError('https://musicbrainz.org/ws/2/recording/',503,'Busy',None,None)
+            with patch.object(preparation,'request',side_effect=failure) as busy,self.assertRaisesRegex(ValueError,'MusicBrainz is unavailable'):
+                providers.musicbrainz('recording/',{'query':'recording:"Song"','fmt':'json'})
+            self.assertEqual(busy.call_count,2)
     def test_private_urls_credentials_and_downgrade_redirects_are_rejected(self):
         for url in ['http://artist.example/song.mp3','file:///tmp/song.mp3','https://127.0.0.1/song.mp3','https://[::1]/song.mp3','https://user:secret@artist.example/song.mp3','https://artist.example:444/song.mp3']:
             with self.subTest(url=url),self.assertRaises(ValueError):download_http.public_url(url)

@@ -388,6 +388,19 @@ time.sleep(60)
         worker=threading.Thread(target=range_worker);worker.start();worker.join(1)
         self.assertEqual(cancelled,[True])
 
+    def test_late_cancel_does_not_reopen_a_finished_scan_job(self):
+        control=set_scan_jobs.ScanControl(api)
+        jobs={'scan':{'id':'scan','state':'completed','stage':'Working'}}
+        with patch.dict(preparation.JOBS,jobs,clear=True):
+            control.attach('scan',lambda fields:preparation.JOBS['scan'].update(fields))
+            preparation.JOBS['scan']['state']='completed'
+            control.cancel()
+            self.assertEqual(preparation.JOBS['scan']['state'],'completed')
+            preparation.JOBS['scan']['state']='running'
+            control.cancel()
+            self.assertEqual(preparation.JOBS['scan']['state'],'cancelling')
+        control.finish()
+
     def test_cancelling_scan_is_retained_when_finished_jobs_are_pruned(self):
         jobs={'scan':{'state':'cancelling'},**{str(i):{'state':'completed'} for i in range(151)}}
         with patch.dict(preparation.JOBS,jobs,clear=True),patch.object(preparation.PROVIDER_POOL,'submit'):

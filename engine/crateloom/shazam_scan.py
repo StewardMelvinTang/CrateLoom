@@ -8,17 +8,16 @@ import tempfile
 import threading
 import time
 
-from . import download_http, service_links, youtube_audio, set_scan_jobs
+from . import download_http, set_scan_jobs
 from .library_imports import ImportCancelled
-from .acquisitions import AudioTransfer
-from .shazam_worker import BATCH_SECONDS, MAX_DURATION, RATE_LIMIT_COOLDOWN, REQUEST_INTERVAL
+from .shazam_worker import MAX_DURATION, RATE_LIMIT_COOLDOWN, REQUEST_INTERVAL
 
 WORKERS = set()
 LOCK = threading.Lock()
 CLOSING = threading.Event()
 SCAN_LOCK = threading.Lock()
-MEDIA_CACHE = None
 NEXT_SCAN_AT = 0
+WORKER_TIMEOUT = 45*60
 
 
 class ScanBusy(ValueError):
@@ -63,9 +62,9 @@ def scan(api, watch, path, *, offset=0, expected_duration=None, batch=True, plan
             while NEXT_SCAN_AT>time.monotonic():
                 check_running()
                 control.stop.wait(min(.2,NEXT_SCAN_AT-time.monotonic()))
+        # The sampled plan sets its own batch length; a linear scan reads the whole mix.
         result = scan_batch(api, watch, path, offset=offset, expected_duration=expected_duration,
-                            batch_seconds=BATCH_SECONDS if batch else MAX_DURATION,
-                            plan=(plan or {}) if batch else None)
+                            batch_seconds=MAX_DURATION, plan=(plan or {}) if batch else None)
         NEXT_SCAN_AT = time.monotonic()+max(REQUEST_INTERVAL,result.get('cooldown') or 0)
         return result
     finally:
@@ -109,16 +108,18 @@ def run_worker(api, python, source, offset, expected_duration, batch_seconds, pl
         control.partial={'hits':[],'scanned_until':offset,'duration':duration,**({'plan':plan} if plan is not None else {})}
         control.publish('Identifying tracks',completed=offset,total=duration,unit='seconds')
     last_feedback = None
+    partial = None
     def receive_progress():
-        nonlocal last_feedback
+        nonlocal last_feedback, partial
         try:
             stamp = feedback_path.stat().st_mtime_ns
             if stamp==last_feedback:
                 return
             data = json.loads(feedback_path.read_text())
             last_feedback = stamp
+            partial = data['partial']
             if control:
-                control.partial=data['partial']
+                control.partial=partial
                 progress=data['progress']
                 if not control.stop.is_set():
                     control.publish(progress['stage'],**{k:v for k,v in progress.items() if k!='stage'})
@@ -138,15 +139,16 @@ def run_worker(api, python, source, offset, expected_duration, batch_seconds, pl
     except BaseException:
         feedback.cleanup()
         raise
+    timed_out = False
     with worker:
         try:
-            deadline = time.monotonic()+45*60
+            deadline = time.monotonic()+WORKER_TIMEOUT
             sent = False
             while True:
                 check_running()
                 receive_progress()
                 if time.monotonic()>deadline:
-                    raise subprocess.TimeoutExpired(command,45*60)
+                    raise subprocess.TimeoutExpired(command,WORKER_TIMEOUT)
                 try:
                     stdout, stderr = worker.communicate(json.dumps(plan) if plan is not None and not sent else None, timeout=.2)
                     receive_progress()
@@ -160,11 +162,21 @@ def run_worker(api, python, source, offset, expected_duration, batch_seconds, pl
             raise
         except subprocess.TimeoutExpired:
             api.stop_worker(worker)
-            raise ValueError('The Shazam scan timed out. Try a shorter mix.') from None
+            receive_progress()
+            timed_out = True
         finally:
             with LOCK:
                 WORKERS.discard(worker)
             feedback.cleanup()
+    if timed_out:
+        # Keep what the worker already reported instead of discarding the whole scan.
+        try:
+            kept = bool(partial['hits'] or partial['scanned_until']>offset or partial.get('plan',{}).get('samples'))
+        except (TypeError,KeyError,AttributeError):
+            kept = False
+        if not kept:
+            raise ValueError('The Shazam scan timed out. Try a shorter mix.')
+        return dict(partial,duration=duration,warning='The Shazam scan timed out before the end of the mix. The matches found so far were kept.')
     if worker.returncode:
         raise ValueError(stderr.strip().splitlines()[-1] if stderr.strip() else 'ShazamIO stopped unexpectedly.')
     report = json.loads(stdout)

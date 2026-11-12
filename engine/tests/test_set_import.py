@@ -1,8 +1,10 @@
 from contextlib import ExitStack
 import email.message
 import io
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -10,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from crateloom import __main__ as api
-from crateloom import acquisitions, download_http, playlist_sources, set_import, shazam_fast, shazam_scan, shazam_worker, soundcloud_download
+from crateloom import acquisitions, download_http, playlist_sources, preparation, providers, set_import, set_scan_jobs, shazam_fast, shazam_scan, shazam_worker, soundcloud_download
 
 
 class AudioResponse(io.BytesIO):
@@ -46,9 +48,29 @@ class SetImport(unittest.TestCase):
         self.assertEqual(task['state'], 'completed', task)
         return task['result']
 
-    def fixture(self, name, frequency, *, artist=None, title=None):
+    def settle(self, task):
+        deadline = time.monotonic()+8
+        while task['state'] in ('running','cancelling') and time.monotonic() < deadline:
+            time.sleep(.02)
+            task = api.dispatch('metadata.job', {'id':task['id']})
+        self.assertNotIn(task['state'], ('running','cancelling'), task)
+        return task
+
+    def with_playlist(self, saved):
+        playlist = api.dispatch('playlists.save', {'name':'Set','track_ids':[]})
+        with api.connect() as db:
+            db.execute('UPDATE dj_sets SET playlist_id=? WHERE id=?', (playlist['id'],saved['id']))
+        return saved
+
+    def recognizer(self, body):
+        executable = self.root/'recognizer'
+        executable.write_text('#!'+sys.executable+'\n'+body)
+        executable.chmod(0o755)
+        return str(executable)
+
+    def fixture(self, name, frequency, *, artist=None, title=None, duration=2):
         dest = self.root/name
-        args = ['ffmpeg','-v','error','-f','lavfi','-i',f'sine=frequency={frequency}:duration=2']
+        args = ['ffmpeg','-v','error','-f','lavfi','-i',f'sine=frequency={frequency}:duration={duration}']
         if artist:
             args += ['-metadata',f'artist={artist}','-metadata',f'title={title}']
         subprocess.run([*args,str(dest)],check=True)
@@ -382,3 +404,227 @@ class SetImport(unittest.TestCase):
         with patch.object(soundcloud_download, 'request', return_value=[track, alternate]):
             self.assertEqual(soundcloud_download.find('Artist','Song (DJ Remix)',set_import.key,180),track['permalink_url'])
             self.assertIsNone(soundcloud_download.find('Artist','Song (DJ Remix)',set_import.key,210))
+
+    def test_explicit_resume_is_not_held_back_by_the_stall_backoff(self):
+        saved = set_import.save_report(api,'Mix',None,[],'Partial scan.',checkpoint=(10,100,'mix.wav',0))
+        sid = saved['id']
+        cooldown = shazam_scan.RATE_LIMIT_COOLDOWN
+        def retry_at(value=None):
+            with api.connect() as db:
+                if value is not None:
+                    db.execute('UPDATE dj_set_scan SET retry_at=? WHERE set_id=?',(value,sid))
+                return db.execute('SELECT retry_at FROM dj_set_scan WHERE set_id=?',(sid,)).fetchone()[0]
+        with patch.object(shazam_scan,'scan',return_value={
+            'duration':100,'hits':[],'scanned_until':10,'cooldown':cooldown,'warning':'Rate limited',
+        }) as provider:
+            for _ in range(set_import.MAX_STALLED_ATTEMPTS):
+                retry_at(0)
+                self.assertTrue(set_import.auto_scan_step(api))
+            self.assertGreater(retry_at(),time.time()+cooldown*4)
+            resumed = api.dispatch('sets.auto_scan',{'id':sid,'enabled':True})['scan']
+            self.assertTrue(resumed['automatic'])
+            self.assertLessEqual(resumed['retry_at'],time.time()+cooldown)
+            self.assertGreater(resumed['retry_at'],time.time()+cooldown-10)
+            # A genuine rate-limit cooldown is never shortened.
+            genuine = retry_at(time.time()+cooldown/2)
+            self.assertEqual(api.dispatch('sets.auto_scan',{'id':sid,'enabled':True})['scan']['retry_at'],genuine)
+            api.dispatch('sets.auto_scan',{'id':sid,'enabled':False})
+            calls = provider.call_count
+            retry_at(time.time()+cooldown*8)
+            failed = self.settle(api.dispatch('sets.resume_scan',{'id':sid}))
+            wait = int(failed['error'].split('Resume in ')[1].split()[0])
+            self.assertTrue(cooldown-10 <= wait <= cooldown,failed)
+            self.assertLessEqual(retry_at(),time.time()+cooldown)
+            self.assertEqual(provider.call_count,calls)
+            retry_at(0)
+            self.assertEqual(self.settle(api.dispatch('sets.resume_scan',{'id':sid}))['state'],'completed')
+            self.assertEqual(provider.call_count,calls+1)
+
+    def test_add_local_reports_an_unknown_entry_or_position(self):
+        rows = set_import.parse_tracklist('0:00 Artist - Track','Pasted tracklist')
+        saved = self.with_playlist(set_import.save_report(api,'Mix',None,rows,None))
+        source = self.fixture('local.wav',440)
+        for target in ({'position':7},{'entry_id':'999999'}):
+            with self.subTest(target=target), self.assertRaisesRegex(ValueError,'Set entry not found'):
+                api.dispatch('sets.add_local',{'id':saved['id'],'path':str(source),**target})
+        with self.assertRaisesRegex(ValueError,'Choose a local audio file'):
+            api.dispatch('sets.add_local',{'id':saved['id'],'path':str(source)})
+        entry = saved['tracks'][0]['entry_id']
+        report = self.finish(api.dispatch('sets.add_local',{'id':saved['id'],'entry_id':entry,'path':str(source)}))
+        self.assertTrue(report['tracks'][0]['track_id'])
+
+    def test_apply_recommended_keeps_started_tasks_when_the_request_queue_fills(self):
+        rows = []
+        for index in range(3):
+            row = set_import.listed_item(index*20,f'Artist - Song {index}','Test')
+            row['source_options'] = [{'title':f'Artist Song {index} Audio','url':f'https://artist.example/{index}','duration':180}]
+            rows.append(row)
+        saved = self.with_playlist(set_import.save_report(api,'Set',None,rows,None))
+        full = ValueError('The request queue is full. Try again after a few requests finish.')
+        started = [{'id':'one','state':'running'},{'id':'two','state':'running'}]
+        with patch.object(preparation,'launch',side_effect=[*started,full]) as launch:
+            tasks = api.dispatch('sets.apply_recommended',{'id':saved['id']})
+        self.assertEqual(launch.call_count,3)
+        self.assertEqual([(task['id'],task['entry_id']) for task in tasks],
+                         [('one',saved['tracks'][0]['entry_id']),('two',saved['tracks'][1]['entry_id'])])
+        with patch.object(preparation,'launch',side_effect=full):
+            with self.assertRaisesRegex(ValueError,'queue is full'):
+                api.dispatch('sets.apply_recommended',{'id':saved['id']})
+
+    def test_repeated_source_lookup_does_not_duplicate_links(self):
+        recording = '11111111-1111-4111-8111-111111111111'
+        reference = {'id':'reference','recording_id':recording,'values':{},
+                     'source_url':'https://musicbrainz.org/recording/'+recording}
+        relations = {'relations':[{'type-id':'other','url':{'resource':'https://soundcloud.com/artist/track'}},
+                                  {'type-id':set_import.FREE_DOWNLOAD,'url':{'resource':'https://artist.example/free.wav'}}]}
+        shazam = {'label':'Shazam','url':'https://www.shazam.com/track/123'}
+        item = set_import.listed_item(0,'Artist - Track','Pasted tracklist')
+        item.update(needs_review=False,links=[shazam,dict(shazam)])
+        with patch.object(set_import,'reference_for',return_value=reference), \
+             patch.object(providers,'musicbrainz',return_value=relations), \
+             patch.object(download_http,'inspect',side_effect=ValueError('Unavailable')), \
+             patch.object(set_import,'find_video_source',return_value=(None,None)), \
+             patch.object(set_import,'find_soundcloud_source',return_value=None):
+            for _ in range(3):
+                source, error = set_import.source_for(api,item,None)
+                self.assertIsNone(source)
+        self.assertEqual([link['label'] for link in item['links']],['Shazam','MusicBrainz','SoundCloud','Creator download'])
+
+    def test_deleting_a_report_stops_its_running_scan_cleanly(self):
+        for automatic in (False,True):
+            with self.subTest(automatic=automatic):
+                saved = set_import.save_report(api,'Mix',None,[],None,checkpoint=(0,120,'mix.wav',0),plan={'samples':{}})
+                sid = saved['id']
+                entered, release = threading.Event(), threading.Event()
+                def recognize(*args,**kwargs):
+                    control = set_scan_jobs.current()
+                    control.partial = {'duration':120,'scanned_until':60,'hits':[]}
+                    entered.set();release.wait(5);control.check()
+                    return {'duration':120,'hits':[]}
+                outcome = []
+                with patch.object(shazam_scan,'scan',side_effect=recognize):
+                    if automatic:
+                        thread = threading.Thread(target=lambda:outcome.append(set_import.auto_scan_step(api)))
+                        thread.start()
+                    else:
+                        task = api.dispatch('sets.resume_scan',{'id':sid})
+                    try:
+                        self.assertTrue(entered.wait(2))
+                        self.assertEqual(api.dispatch('sets.delete',{'id':sid}),{'deleted':sid})
+                    finally:
+                        release.set()
+                    if automatic:
+                        thread.join(3)
+                        self.assertEqual(outcome,[False])
+                    else:
+                        task = self.settle(task)
+                        self.assertEqual((task['state'],task['error']),('cancelled',None))
+                self.assertEqual(api.dispatch('sets.list',{}),[])
+                self.assertIsNone(set_scan_jobs.for_report(api,sid))
+                with api.connect() as db:
+                    for table in ('dj_set_scan','dj_set_scan_work','dj_set_auto_scan','dj_set_items'):
+                        self.assertEqual(db.execute(f'SELECT count(*) FROM {table}').fetchone()[0],0,table)
+
+    def test_cancel_task_disables_continuation_before_the_job_publishes_its_report(self):
+        entered, release = threading.Event(), threading.Event()
+        def scan(*args):
+            control = set_scan_jobs.current()
+            with control.lock:
+                saved = set_import.save_report(api,'Mix',None,[],'Partial scan.',checkpoint=(10,100,'mix.wav',0))
+                control.result = saved
+            entered.set();release.wait(5)
+            return saved
+        with patch.object(set_import,'scan',side_effect=scan):
+            task = api.dispatch('sets.scan',{'tracklist':'0:00 Artist - Track'})
+            try:
+                self.assertTrue(entered.wait(2))
+                self.assertIsNone(api.dispatch('metadata.job',{'id':task['id']})['result'])
+                stopped = api.dispatch('sets.cancel_task',{'task_id':task['id']})
+                self.assertFalse(stopped['result']['scan']['automatic'])
+            finally:
+                release.set()
+            finished = self.settle(task)
+        self.assertEqual(finished['state'],'cancelled')
+        self.assertFalse(api.dispatch('sets.get',{'id':finished['result']['id']})['scan']['automatic'])
+
+    def test_cancel_task_on_a_manual_resume_keeps_the_scan_paused(self):
+        saved = set_import.save_report(api,'Mix',None,[],None,checkpoint=(0,120,'mix.wav',0),plan={'samples':{}})
+        self.assertTrue(saved['scan']['automatic'])
+        entered, release = threading.Event(), threading.Event()
+        def recognize(*args,**kwargs):
+            control = set_scan_jobs.current()
+            control.partial = {'duration':120,'scanned_until':0,'hits':[],
+                               'plan':{'samples':{'0':{'key':'1','title':'First','artist':'Artist'}}}}
+            entered.set();release.wait(5);control.check()
+        with patch.object(shazam_scan,'scan',side_effect=recognize):
+            task = api.dispatch('sets.resume_scan',{'id':saved['id']})
+            try:
+                self.assertTrue(entered.wait(2))
+                stopped = api.dispatch('sets.cancel_task',{'task_id':task['id']})
+                self.assertFalse(stopped['result']['scan']['automatic'])
+            finally:
+                release.set()
+            self.assertEqual(self.settle(task)['state'],'cancelled')
+        report = api.dispatch('sets.get',{'id':saved['id']})
+        self.assertFalse(report['scan']['automatic'])
+        self.assertEqual(report['scan']['pending_matches'],1)
+        self.assertFalse(set_import.auto_scan_step(api))
+
+    def test_whole_mix_scan_keeps_partial_matches_when_the_worker_times_out(self):
+        source = self.fixture('mix.wav',440,duration=30)
+        tracklist = '0:00 Artist - First\n0:20 Artist - Second'
+        reporting = self.recognizer('''
+import json,os,time
+from pathlib import Path
+target=Path(os.environ['CRATELOOM_SCAN_PROGRESS'])
+target.write_text(json.dumps({'progress':{'stage':'Identifying tracks','completed':10,'total':30,'unit':'seconds','samples':1},'partial':{'duration':30,'scanned_until':10,'hits':[{'start':0,'end':10,'title':'First','artist':'Artist','key':'123','samples':1}]}}))
+time.sleep(60)
+''')
+        with patch.object(shazam_scan,'interpreter',return_value=reporting), \
+             patch.object(shazam_scan,'NEXT_SCAN_AT',0), patch.object(shazam_scan,'WORKER_TIMEOUT',2.5):
+            report = self.finish(api.dispatch('sets.scan',{'path':str(source),'fingerprint':True,'tracklist':tracklist}))
+        self.assertEqual([(row['title'],row['evidence']) for row in report['tracks']],
+                         [('First',['Pasted tracklist','Fingerprint']),('Second',['Pasted tracklist'])])
+        self.assertTrue(report['warning'].startswith('Partial scan. The Shazam scan timed out'),report['warning'])
+        self.assertFalse(shazam_scan.WORKERS)
+        silent = self.recognizer('import time\ntime.sleep(60)\n')
+        with patch.object(shazam_scan,'interpreter',return_value=silent), \
+             patch.object(shazam_scan,'NEXT_SCAN_AT',0), patch.object(shazam_scan,'WORKER_TIMEOUT',.3):
+            report = self.finish(api.dispatch('sets.scan',{'path':str(source),'fingerprint':True,'tracklist':tracklist}))
+        self.assertEqual([row['evidence'] for row in report['tracks']],[['Pasted tracklist']]*2)
+        self.assertIn('timed out. Try a shorter mix',report['warning'])
+
+    def test_fast_scan_reports_undecodable_audio_in_one_line(self):
+        with self.assertRaisesRegex(ValueError,'FFmpeg could not decode the mix audio'):
+            shazam_fast.decode(self.root/'missing.wav',0)
+        stubs = self.root/'stubs'
+        (stubs/'shazamio').mkdir(parents=True)
+        (stubs/'aiohttp_retry.py').write_text('def ExponentialRetry(**options):return None\n')
+        (stubs/'shazamio'/'__init__.py').write_text('class Shazam:\n    def __init__(self,**options):pass\n')
+        (stubs/'shazamio'/'client.py').write_text(
+            'class HTTPClient:\n    def __init__(self,**options):pass\n'
+            '    async def __aenter__(self):return self\n    async def __aexit__(self,*args):pass\n')
+        (stubs/'shazamio'/'exceptions.py').write_text('class RateLimited(Exception):pass\n')
+        engine = Path(set_import.__file__).resolve().parent.parent
+        worker = subprocess.run([sys.executable,'-m','crateloom.shazam_worker',str(self.root/'missing.wav'),'30','0','10800','fast'],
+                                input='{}',capture_output=True,text=True,timeout=60,
+                                env=dict(os.environ,PYTHONPATH=os.pathsep.join((str(stubs),str(engine))),PYTHONDONTWRITEBYTECODE='1'))
+        self.assertEqual(worker.returncode,1)
+        self.assertEqual(worker.stderr.strip(),'FFmpeg could not decode the mix audio.')
+
+    def test_attaching_artwork_uses_the_running_engine_module(self):
+        rows = set_import.parse_tracklist('0:00 Artist - Track','Pasted tracklist')
+        artwork = self.root/'artwork'/'cover.png'
+        artwork.parent.mkdir()
+        artwork.write_bytes(b'cached-image')
+        rows[0]['artwork_path'] = str(artwork)
+        saved = self.with_playlist(set_import.save_report(api,'Mix',None,rows,None))
+        source = self.fixture('local.wav',440)
+        # Under ``python -m crateloom`` the running module is ``__main__``; importing it by name loads a second copy.
+        import crateloom
+        with patch.dict(sys.modules,{'crateloom.__main__':None}), patch.dict(vars(crateloom)):
+            del crateloom.__main__
+            report = set_import.add_local(api,saved['id'],saved['tracks'][0]['entry_id'],str(source))
+        track = api.dispatch('track.playback',{'id':report['tracks'][0]['track_id']})
+        self.assertEqual(track['metadata']['artwork_path'],str(artwork))
+

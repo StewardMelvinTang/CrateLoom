@@ -1,18 +1,12 @@
 """Cache album artwork independently of source resolution and audio downloads."""
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
 import re
-import threading
 import urllib.parse
 
 from . import download_http, preparation
 from .metadata_matching import normalized, search_identity
-
-POOL = ThreadPoolExecutor(max_workers=3, thread_name_prefix='set-artwork')
-LOCK = threading.Lock()
-PENDING = set()
 
 
 def artwork_url(value):
@@ -97,18 +91,3 @@ def enrich(api, sid):
     from .set_import import report
     with api.connect() as db:
         return report(db, sid)
-
-
-def queue(api, sid):
-    key = (str(api.ROOT), sid)
-    with LOCK:
-        if key in PENDING:
-            return
-        PENDING.add(key)
-    def work():
-        try:
-            enrich(api, sid)
-        finally:
-            with LOCK:
-                PENDING.discard(key)
-    POOL.submit(work)
