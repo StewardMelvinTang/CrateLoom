@@ -309,10 +309,30 @@ kbd { font: inherit; font-size: 11px; color: var(--muted); border: 1px solid var
 .inline-explainer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 24px 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--side); font-size: 12px; }
 .inline-explainer p { flex: 1 1 320px; color: var(--text); line-height: 1.5; }
 .inline-explainer button { padding: 6px 12px; font-size: 12px; }
-.table-head, .track-row { grid-template-columns: minmax(200px,2.2fr) minmax(100px,1fr) 46px 44px minmax(118px,150px) var(--row-actions,56px); }
+.table-head, .track-row { grid-template-columns: minmax(160px,2.2fr) var(--col-artist,minmax(100px,1fr)) var(--col-bpm,48px) var(--col-key,44px) var(--col-time,46px) var(--col-status,minmax(118px,150px)) var(--row-actions,56px); }
 .library[data-playlist] { --row-actions: 104px; }
 .table-head { position: sticky; top: 0; z-index: 3; background: var(--bg); }
-.table-head .track-bpm, .track-row .track-bpm, .table-head .track-bpm + span, .track-row .track-bpm + .time { text-align: right; }
+.track-row .track-bpm, .track-row .track-key, .track-row .track-time { text-align: right; }
+.track-row .track-key { font-weight: 600; color: var(--text); }
+.table-head .column-cell { position: relative; display: flex; align-items: center; min-width: 0; height: 100%; }
+.table-head .column-cell[data-numeric], .table-head .column-key { justify-content: flex-end; }
+.table-head .select-visible { gap: 9px; }
+.column-sort { min-width: 0; min-height: 0; padding: 3px 0; gap: 2px; border: 0; border-radius: 4px; background: transparent; color: inherit; font-size: 12px; font-weight: 500; }
+.column-sort > span { overflow: hidden; text-overflow: ellipsis; }
+.column-sort:hover:not(:disabled) { color: var(--text); }
+.column-sort[data-active] { color: var(--text); font-weight: 650; }
+.column-sort > svg { flex: none; }
+/* The handle sits on the gap left of its column; the line is the visible column edge. */
+.column-resizer { position: absolute; top: 9px; bottom: 9px; left: -11px; width: 10px; cursor: col-resize; touch-action: none; z-index: 1; border-radius: 3px; }
+.column-resizer::after { content: ''; position: absolute; left: 4.5px; top: 0; bottom: 0; width: 1px; background: var(--line); transition: background 120ms ease-out; }
+.column-resizer:hover::after, .column-resizer:focus-visible::after, body[data-resizing-column] .column-resizer:active::after { background: var(--accent); width: 2px; left: 4px; }
+.column-resizer:focus-visible { outline-offset: 0; }
+body[data-resizing-column] { cursor: col-resize; user-select: none; }
+.context-menu.menu-list { position: fixed; z-index: 70; min-width: 210px; }
+.context-menu button { min-height: 0; justify-content: start; align-items: start; text-align: left; gap: 9px; padding: 7px 9px; font-size: 13px; font-weight: 400; white-space: normal; color: var(--text); background: transparent; border-color: transparent; }
+.context-menu button:hover:not(:disabled), .context-menu button:focus-visible { background: var(--accent-soft); border-color: transparent; }
+.context-menu button:focus-visible { outline-offset: -2px; }
+.context-menu-separator { height: 1px; margin: 4px 6px; background: var(--line); }
 .select-visible { min-width: 0; }
 .track-title-cell .cover-play { position: relative; overflow: hidden; padding: 0; border: 0; }
 .cover-play:disabled { opacity: .5; }
@@ -409,10 +429,10 @@ kbd { font: inherit; font-size: 11px; color: var(--muted); border: 1px solid var
 @media (max-width:1100px) {
   .library-context, .library-tools { padding-inline: 20px; }
   .inline-explainer, .inline-error.dismissible { margin-inline: 20px; }
-  .table-head, .track-row { grid-template-columns: minmax(170px,2fr) minmax(90px,1fr) 44px 42px 124px var(--row-actions,56px); }
+  .table-head, .track-row { grid-template-columns: minmax(150px,2fr) var(--col-artist,minmax(90px,1fr)) var(--col-bpm,44px) var(--col-key,40px) var(--col-time,42px) var(--col-status,124px) var(--row-actions,56px); }
 }
 @media (max-width:850px) {
-  .table-head, .track-row { grid-template-columns: minmax(140px,1fr) 44px 42px 112px var(--row-actions,56px); }
+  .table-head, .track-row { grid-template-columns: minmax(140px,1fr) var(--col-bpm,44px) var(--col-key,40px) var(--col-time,42px) var(--col-status,112px) var(--row-actions,56px); }
   .table-head .track-artist, .track-row .track-artist { display: none; }
   .track-artist-inline { display: block; }
   .selection-tools { padding-left: 0; border-left: 0; }

@@ -34,6 +34,32 @@ def source_group(source):
     return source.get('adapter') or urlsplit(source['url']).hostname
 
 
+def is_dash(probe):
+    """True for a fragmented MP4 as YouTube serves it (major brand 'dash')."""
+    tags = (probe.get('format') or {}).get('tags') or {}
+    return str(tags.get('major_brand', '')).strip().lower() == 'dash'
+
+
+def repack_m4a(api, path):
+    """Copy the audio stream of a fragmented MP4 into a regular M4A in place, without re-encoding.
+
+    Returns the new size and SHA-256 of the file.
+    """
+    path = Path(path)
+    staged = path.with_name(path.name + '.repack.m4a')
+    try:
+        api.import_process(['ffmpeg', '-v', 'error', '-y', '-i', str(path), '-map', '0:a:0', '-c', 'copy',
+                            '-map_metadata', '0', '-movflags', '+faststart', '-f', 'ipod', str(staged)], 120)
+        os.replace(staged, path)
+    finally:
+        staged.unlink(missing_ok=True)
+    digest = hashlib.sha256()
+    with path.open('rb') as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b''):
+            digest.update(block)
+    return path.stat().st_size, digest.hexdigest()
+
+
 class RangeUnavailable(ValueError):
     pass
 
@@ -429,6 +455,16 @@ class Manager(AudioTransfer):
                 info, received, digest = self.transfer(jid, source, transfer_url, headers, partial, check, ranges=use_ranges)
             check();self.update(jid,state='verifying',stage='Verifying audio',downloaded_bytes=received)
             probe = json.loads(api.import_process(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(partial)],30).stdout)
+            repacked = False
+            if from_youtube and is_dash(probe):
+                # YouTube serves fragmented MP4 (DASH). WebKit reports such files as twice their
+                # length and plays silence past the end, so the audio is copied, unchanged,
+                # into a regular M4A.
+                self.update(jid,stage='Repacking audio')
+                received, digest = repack_m4a(api,partial)
+                repacked = True
+                check()
+                probe = json.loads(api.import_process(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(partial)],30).stdout)
             streams = probe.get('streams',[]);audio = next((s for s in streams if s.get('codec_type')=='audio'),None)
             if audio is None or any(s.get('codec_type')=='video' and not s.get('disposition',{}).get('attached_pic') for s in streams):
                 raise ValueError('Choose an audio file without a video stream')
@@ -447,7 +483,7 @@ class Manager(AudioTransfer):
             quality = {'codec':audio.get('codec_name') or 'unknown','container':extension[1:],'sample_rate':int(audio.get('sample_rate') or 0),
                        'channels':audio.get('channels'),'bit_rate':int(audio.get('bit_rate') or probe['format'].get('bit_rate') or 0),
                        'duration':duration,'bytes':received,'sha256':digest,'source_url':source['url'] if from_youtube else download_http.display_url(source['url']),
-                       'resolved_url':source['url'] if from_youtube or from_soundcloud else download_http.display_url(info['resolved_url']),'downloaded_at':now(),'converted':False,
+                       'resolved_url':source['url'] if from_youtube or from_soundcloud else download_http.display_url(info['resolved_url']),'downloaded_at':now(),'converted':False,'repacked':repacked,
                        'reference_url':reference.get('source_url') if reference else None,'version_verified':False}
             check()
             name = re.sub(r'[^\w .()-]','_',Path(source['filename']).stem).strip(' .')[:100] or 'audio'

@@ -8,7 +8,7 @@ Read [the November 13 verification note](docs/UX_SCAN_FIXES_VERIFICATION.md) fir
 
 - The whole working tree described below is now committed, with later fixes, on branch `ux-scan-fixes` (not pushed; `main` is unchanged). The installed app is still the November 12 build.
 - Section 6: the generic failure seen with a selected browser was an unreadable browser session reported as a connection problem. That is fixed and tested with fixtures; an anonymous scan of the supplied mix now shows the age-verification message beside the YouTube access control. Reading a real browser session is still unverified and still needs the owner's own run.
-- New engine methods: `playlists.delete`, `library.remove`, `acquisitions.clear_failed`. Analysis version is `librosa-0.11.0-grid-6` and beat analysis fits a constant-tempo grid.
+- New engine methods: `playlists.delete`, `library.remove`, `acquisitions.clear_failed`. Analysis version is `librosa-0.11.0-grid-7`: beat analysis fits a constant-tempo grid and detects the key (Camelot).
 - The frontend was split: `main.tsx` holds state and engine calls; views are in `LibraryView.tsx`, `CueEditor.tsx`, `PlayerBar.tsx`. Engine calls go through `engine.ts`.
 - `scripts/preview-browser.mjs` runs the interface in a browser against a real engine and a disposable library (`CRATELOOM_DATA` is required).
 - Baseline is now 170 Python tests, 14 frontend tests, 2 Rust tests, and the interaction harness passing in Chromium and WebKit.

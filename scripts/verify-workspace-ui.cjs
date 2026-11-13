@@ -18,7 +18,7 @@ const fs=require('fs'); const assert=require('node:assert/strict');
  await page.addInitScript(()=>{
  localStorage.setItem('theme','dark');
  // Tracks whose saved analysis has another version are analysed again, so the fixture matches the handshake.
- const ANALYSIS_VERSION='librosa-0.11.0-grid-6';
+ const ANALYSIS_VERSION='librosa-0.11.0-grid-7';
  // Record what each Cue Editor transition animates, when the browser has view transitions.
  const startTransition=document.startViewTransition?.bind(document);
  if(startTransition){window.__qaViewTransitions=true;document.startViewTransition=update=>{
@@ -27,7 +27,7 @@ const fs=require('fs'); const assert=require('node:assert/strict');
    return transition;
  };}
  const songs=[['Low (feat. T-Pain)','Flo Rida, T-Pain'],['The Days (Notion Remix)','CHRYSTAL'],["Don\u2019t Stop the Music",'MITCH DB, Level 8, MusicByDavid'],['Starships','Nicki Minaj'],['One More Time','Daft Punk']];
- const tracks=songs.map(([title,artist],i)=>({id:'t'+i,title,artist,path:'/audio.wav',duration:8,codec:location.search.includes('fallback')?'pcm_s16be':'mp3',sample_rate:44100,missing:false,cues:[],sections:[],analysis:null,structure_analysis:null,grid_offset_us:0,metadata:{values:{title,artist},pending:{},artwork_path:'/cover-0'},detail_analysis:{version:ANALYSIS_VERSION,cache_path:'',cache_key:'x'}}));
+ const tracks=songs.map(([title,artist],i)=>({id:'t'+i,title,artist,path:'/audio.wav',duration:8,codec:location.search.includes('fallback')?'pcm_s16be':'mp3',sample_rate:44100,missing:false,cues:[],sections:[],analysis:null,structure_analysis:null,grid_offset_us:0,metadata:{values:{title,artist},pending:{},artwork_path:'/cover-0'},detail_analysis:{version:ANALYSIS_VERSION,cache_path:'',cache_key:'x',tempo:[101,124.5,128,null,123][i],key:[{camelot:'8A',name:'A minor',short:'Am',strength:.7},{camelot:'11B',name:'A major',short:'A',strength:.6},null,{camelot:'2A',name:'E♭ minor',short:'Ebm',strength:.5},{camelot:'10B',name:'D major',short:'D',strength:.6}][i]}}));
  const playlists=[{id:'p',name:'Friday selections',track_ids:JSON.parse(localStorage.getItem('qaOrder') || '["t0","t1","t2","t3","t4"]')}];
  // What a running audio scan has heard but not yet placed (report.provisional).
  const HEARD=[{at:312,end:372,title:'Nightcall',artist:'Kavinsky',samples:2},{at:401,end:430,title:'Midnight City',artist:'M83',samples:1}];
@@ -66,6 +66,9 @@ const fs=require('fs'); const assert=require('node:assert/strict');
    metadataBatch.written=metadataBatch.items.filter(item=>item.written===true).length;metadataBatch.write_failed=metadataBatch.items.filter(item=>item.write_error).length;
    localStorage.setItem('qaMetadataTracks',JSON.stringify(tracks));localStorage.setItem('qaMetadataBatch',JSON.stringify(metadataBatch));return copy(metadataBatch);
  };
+ // Test hooks: shorten a track (its media stays 8 s long, as WebKit reports DASH files) and record copies.
+ window.__qaSetDuration=(id,seconds)=>{tracks.find(t=>t.id===id).duration=seconds;};
+ Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{window.__qaClipboard=value;}}});
  window.__TAURI_INTERNALS__={convertFileSrc:path=>path.startsWith('/cover')?'/__qa'+path:'/__qa/audio.wav',invoke:async(cmd,args)=>{
  if(cmd==='open_reference')return;
  if(cmd!=='engine_call')return;
@@ -128,6 +131,7 @@ const fs=require('fs'); const assert=require('node:assert/strict');
 const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running'};if(task.playback)return {id:p.id,state:'completed',result:{path:'/audio.wav'}};if(task.entry_id){const row=report.tracks.find(r=>r.entry_id===task.entry_id);row.download_id='dl'+row.entry_id;row.download_state='queued';}return {id:p.id,state:'completed',result:copy(report)};}
  case 'sets.reorder':await new Promise(resolve=>setTimeout(resolve,150));report.tracks=p.entry_ids.map((id,position)=>({...report.tracks.find(row=>row.entry_id===id),position}));return copy(report);
  case 'track.playback':case 'track.get':return copy(tracks.find(t=>t.id===p.id));
+ case 'library.reveal':window.__qaReveals=[...(window.__qaReveals || []),p.id];return {revealed:true};
  case 'cues.save':{const track=tracks.find(t=>t.id===p.id);track.cues=copy(p.cues);window.__qaCueSaves=[...(window.__qaCueSaves || []),copy(p.cues)];return copy(track);}
  case 'playlists.save':{window.__qaSaves=(window.__qaSaves||0)+1;await new Promise(resolve=>setTimeout(resolve,150));if(window.__qaFailNext){window.__qaFailNext=false;throw new Error('Save failed');}
    let playlist=playlists.find(item=>item.id===p.id);if(!playlist){playlist={id:'created'+count++,name:p.name,track_ids:[]};playlists.push(playlist);}
@@ -664,6 +668,71 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  assert.deepEqual(await order(),['Low (feat. T-Pain)','The Days (Notion Remix)','Don’t Stop the Music','Starships']);
  assert.match(await text(page.locator('.playlist-nav .nav').first()),/4$/);assert.equal(await page.getByRole('button',{name:'Clear track selection',exact:true}).count(),0);
  checks.removal='playlist deletion and library removal ask in a dialog (Cancel focused, Cancel and Escape change nothing), then call playlists.delete and library.remove; tracks of a deleted playlist stay';
+
+ // Sorting, column resizing, the row context menu, and the end of a track whose media runs longer than its real length.
+ {
+  // The fixture library comes back whole on reload: t0 101 BPM 8A, t1 124.5 11B, t2 128 no key, t3 no tempo 2A, t4 123 10B.
+  await page.reload();await page.getByRole('button',{name:'All Tracks',exact:true}).click();await wait();
+  const head=page.locator('.table-head'),sortButton=name=>head.getByRole('button',{name:new RegExp('^'+name+'[.,]')});
+  const unsorted=await order();
+  assert.deepEqual(unsorted,['Low (feat. T-Pain)','The Days (Notion Remix)','Don’t Stop the Music','Starships','One More Time']);
+  await sortButton('BPM').click();await wait();
+  assert.deepEqual(await order(),['Low (feat. T-Pain)','One More Time','The Days (Notion Remix)','Don’t Stop the Music','Starships']);
+  assert.equal(await sortButton('BPM').getAttribute('aria-label'),'BPM, sorted ascending. Sort by tempo: descending');
+  await sortButton('BPM').click();await wait();
+  assert.deepEqual(await order(),['Don’t Stop the Music','The Days (Notion Remix)','One More Time','Low (feat. T-Pain)','Starships'],'descending keeps tracks without a tempo last');
+  await sortButton('BPM').click();await wait();assert.deepEqual(await order(),unsorted);
+  assert.deepEqual(await page.locator('.track-row .track-key').allTextContents(),['8A','11B','—','2A','10B']);
+  await sortButton('Key').click();await wait();
+  const byKey=['Starships','Low (feat. T-Pain)','One More Time','The Days (Notion Remix)','Don’t Stop the Music'];
+  assert.deepEqual(await order(),byKey);
+  await page.reload();await page.getByRole('button',{name:'All Tracks',exact:true}).click();await wait();
+  assert.deepEqual(await order(),byKey,'the sort survives a reload');
+  // Sorted playlists cannot be reordered by hand.
+  await page.locator('.playlist-nav .nav').first().click();await wait();
+  assert.equal(await page.locator('.track-row .reorder-handle').first().isDisabled(),true);
+  assert.equal(await page.locator('.track-row .reorder-handle').first().getAttribute('title'),'Clear the sort to reorder');
+  await sortButton('Key').click();await wait();await sortButton('Key').click();await wait();
+  assert.equal(await page.locator('.track-row .reorder-handle').first().isDisabled(),false);
+  await page.getByRole('button',{name:'All Tracks',exact:true}).click();await wait();
+  assert.deepEqual(await order(),unsorted);
+  checks.sorting='BPM ascending, descending (no tempo last), then back to library order; Key sorts by Camelot; the sort persists; sorted playlists lock reordering';
+
+  const artist=head.locator('.column-artist'),resizer=head.getByRole('separator',{name:'Resize Artist column',exact:true});
+  const width=()=>artist.evaluate(el=>Math.round(el.getBoundingClientRect().width));
+  const before=await width(),grip=await resizer.boundingBox();
+  await page.mouse.move(grip.x+grip.width/2,grip.y+grip.height/2);await page.mouse.down();
+  await page.mouse.move(grip.x+grip.width/2-80,grip.y+grip.height/2,{steps:8});await page.mouse.up();await wait();
+  const wider=await width();assert.ok(Math.abs(wider-before-80)<=2,`artist column grew by ${wider-before}px`);
+  assert.equal(await page.locator('.track-row .track-artist').first().evaluate(el=>Math.round(el.getBoundingClientRect().width)),wider,'rows follow the header');
+  await page.reload();await page.getByRole('button',{name:'All Tracks',exact:true}).click();await wait();assert.equal(await width(),wider,'the width survives a reload');
+  await resizer.focus();await page.keyboard.press('ArrowRight');await wait();assert.equal(await width(),wider-8);
+  await resizer.dblclick();await wait();assert.ok(Math.abs(await width()-before)<=1,'double-click restores the default width');
+  checks.columnResize='artist edge drag widens the column by the drag distance, rows follow, persists, arrow keys step 8px, double-click resets';
+
+  const firstRow=page.locator('.track-row').first(),menu=page.getByRole('menu',{name:'Actions for Low (feat. T-Pain)',exact:true});
+  await firstRow.locator('.track-artist').click({button:'right'});await menu.waitFor();
+  assert.deepEqual(await menu.getByRole('menuitem').allTextContents(),['Copy title','Copy artist','Copy artist and title','Reveal in Finder']);
+  assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Copy title');
+  await menu.getByRole('menuitem',{name:'Copy artist',exact:true}).click();await menu.waitFor({state:'detached'});
+  assert.equal(await page.evaluate(()=>window.__qaClipboard),'Flo Rida, T-Pain');
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Copy artist and title',exact:true}).click();
+  assert.equal(await page.evaluate(()=>window.__qaClipboard),'Flo Rida, T-Pain - Low (feat. T-Pain)');
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Reveal in Finder',exact:true}).click();
+  assert.deepEqual(await page.evaluate(()=>window.__qaReveals),['t0']);
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.waitFor();await page.keyboard.press('ArrowDown');
+  assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Copy artist');
+  await page.keyboard.press('Escape');await menu.waitFor({state:'detached'});
+  const box=await menu.count();assert.equal(box,0);
+  checks.contextMenu='right-click opens Copy title / artist / artist and title and Reveal in Finder at the pointer; copies the text, calls library.reveal, arrow keys move, Escape closes';
+
+  // The media is 8 s long but the track is 2 s: playback stops at 0:02 and moves on.
+  await page.evaluate(()=>window.__qaSetDuration('t0',2));
+  await page.getByRole('button',{name:'Play Low (feat. T-Pain)',exact:true}).click();
+  await page.locator('.player-title').getByText('The Days (Notion Remix)',{exact:true}).waitFor({timeout:6000});
+  checks.trackEnd='a track whose media runs past its measured length ends at that length and the next track starts';
+  await page.evaluate(()=>window.__qaSetDuration('t0',8));
+ }
 
  checks.viewTransitions=viewTransitions;
  checks.unhandledEngineCalls=await page.evaluate(()=>JSON.parse(localStorage.getItem('qaUnhandled') || '[]'));assert.deepEqual(checks.unhandledEngineCalls,[]);

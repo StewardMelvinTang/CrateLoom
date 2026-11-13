@@ -24,6 +24,7 @@ import {LibraryView, type ExportSelector, type LibraryFilter} from './LibraryVie
 import {CueEditor, type EditorActions, type Loop} from './CueEditor';
 import {PlayerBar, type RepeatMode} from './PlayerBar';
 import {PlaybackClock} from './waveform-envelope';
+import {sortTracks, useTrackSort} from './trackColumns';
 import {playhead} from './playhead';
 import {AUDIO_EXTENSIONS, needsAnalysis, plural, typingTarget, type AnalysisData, type Cue, type GridState, type ImportItem, type ImportJob, type Job, type Playlist, type Section, type Track} from './types';
 
@@ -97,6 +98,7 @@ function App() {
   const loopRef = useRef<Loop | null>(null);
   const setLoop = useCallback((next: Loop | null) => { loopRef.current = next; setLoopState(next); }, []);
   const shuffleAnchor = useRef<string | null>(null);
+  const trackSort = useTrackSort();
   const playbackClock = useRef(new PlaybackClock());
   const selection = useRef(0);
   const pendingPlayback = useRef<string | null>(null);
@@ -105,6 +107,8 @@ function App() {
   const playbackPreparing = useRef(false), playbackFallback = useRef(false);
   const pendingSeek = useRef<number | null>(null);
   const scrubbing = useRef(false);
+  // The audio generation whose end was already handled, so a track ends only once.
+  const endedGeneration = useRef(-1);
 
   // Editing
   const [saving, setSaving] = useState(false);
@@ -208,7 +212,7 @@ function App() {
     wantsPlayback.current = true;
     const media = audio.current, generation = audioGeneration.current;
     if (!media || playbackPreparing.current || !media.getAttribute('src')) return;
-    if (media.ended) { media.currentTime = 0; playhead.set(0); }
+    if (media.ended || pastEnd(media)) { media.currentTime = 0; playhead.set(0); }
     void media.play().catch(error => {
       if (generation !== audioGeneration.current || !wantsPlayback.current) return;
       if (error.name === 'NotSupportedError') { void preparePlayback(); return; }
@@ -216,6 +220,21 @@ function App() {
     });
   };
   const pauseAudio = () => { wantsPlayback.current = false; pendingPlayback.current = null; audio.current?.pause(); };
+  // WebKit reports YouTube's fragmented (DASH) M4A files as twice their real length and keeps
+  // playing silence after the music. The library's measured duration is the real end.
+  const trackEnd = () => { const track = activeRef.current; return track && track.duration > 0 ? track.duration : Infinity; };
+  const pastEnd = (media: HTMLAudioElement) => media.currentTime >= trackEnd();
+  const finishTrack = () => {
+    const media = audio.current;
+    if (!media || endedGeneration.current === audioGeneration.current) return;
+    endedGeneration.current = audioGeneration.current;
+    wantsPlayback.current = false;
+    if (!media.paused) media.pause();
+    playhead.set(Math.min(media.currentTime, trackEnd()));
+    setPlaying(false);
+    if (!editorRef.current) advancePlayback(1, true);
+  };
+  const checkEnd = (media: HTMLAudioElement) => { if (!media.paused && !media.seeking && pastEnd(media)) finishTrack(); };
   const toggle = () => {
     const media = audio.current, track = activeRef.current;
     if (!media) return;
@@ -270,7 +289,8 @@ function App() {
         const range = loopRef.current;
         if (range && media.currentTime >= range.end) { media.currentTime = range.start; playbackClock.current.reset(media.currentTime, now); }
         const value = playbackClock.current.sample(media.currentTime, now, media.playbackRate, !media.seeking && media.readyState >= 3);
-        playhead.set(Math.max(0, Math.min(media.duration || Infinity, value)));
+        playhead.set(Math.max(0, Math.min(media.duration || Infinity, trackEnd(), value)));
+        checkEnd(media);
       }
       frame = requestAnimationFrame(tick);
     };
@@ -288,8 +308,9 @@ function App() {
     const byId = new Map(tracks.map(track => [track.id, track]));
     return currentPlaylist.track_ids.map(id => byId.get(id)).filter((track): track is Track => !!track);
   }, [currentPlaylist, tracks]);
-  // Order for Previous/Next and auto-advance: the DJ set being played, otherwise the playlist or library on screen.
-  const playbackIds = JSON.stringify(workspace === 'sets' && setPlaybackOrder.length ? setPlaybackOrder : playlistTracks.filter(track => !track.missing).map(track => track.id));
+  // Order for Previous/Next and auto-advance: the DJ set being played, otherwise the playlist or library as sorted on screen.
+  const playbackIds = JSON.stringify(workspace === 'sets' && setPlaybackOrder.length ? setPlaybackOrder
+    : sortTracks(playlistTracks, trackSort.sort).filter(track => !track.missing).map(track => track.id));
   const playbackOrder = React.useMemo(() => {
     const ids = JSON.parse(playbackIds) as string[];
     if (!shuffle) return ids;
@@ -794,7 +815,7 @@ function App() {
         <DiscoveryPanel onImport={importFiles} jobs={acquisitions} error={acquisitionError} onQueue={queueAcquisition} onCancel={cancelAcquisition} onRetry={retryAcquisition} onRefresh={refreshAcquisitions}
           onOpen={async id => { await choose({id}, true); }}/>
       </div>}
-      {!editor && workspace === 'library' && <LibraryView tracks={tracks} playlists={playlists} playlist={currentPlaylist} query={query} filter={libraryFilter} onFilter={setLibraryFilter}
+      {!editor && workspace === 'library' && <LibraryView tracks={tracks} playlists={playlists} playlist={currentPlaylist} query={query} filter={libraryFilter} onFilter={setLibraryFilter} sort={trackSort.sort} onSort={trackSort.cycle}
         loading={!libraryLoaded} selectedIds={selectedIds} onSelectedIds={setSelectedIds} activeId={active?.id ?? null} playing={playing} ordering={ordering} reorder={playlistReorder} exporting={exporting} importing={importing || batchRunning}
         metadataBatch={metadataBatch} unanalysed={unanalysed} actions={{
           analyze: queueAnalysis,
@@ -808,6 +829,7 @@ function App() {
           renamePlaylist: () => setRenaming(true), deletePlaylist, removeFromLibrary,
           exportTracks: (selector, name, copyAudio) => void exportTracks(selector, name, copyAudio),
           moveTrack: movePlaylistTrack, importFiles: () => void importFiles(),
+          reveal: async track => { await call('library.reveal', {id: track.id}); },
         }}/>}
       <PanelPresence open={!!tagWriteIds}>{tagWriteIds && <TagWriteReview ids={tagWriteIds} onClose={() => setTagWriteIds(null)} onSaved={refresh}/>}</PanelPresence>
       <PanelPresence open={!!metadataIds}>{metadataIds && <MetadataEditor key={metadataIds.join(',')} ids={metadataIds} onClose={() => setMetadataIds(null)}
@@ -816,10 +838,15 @@ function App() {
         onLoadedMetadata={event => { if (pendingSeek.current !== null) { event.currentTarget.currentTime = Math.min(pendingSeek.current, event.currentTarget.duration || pendingSeek.current); pendingSeek.current = null; } }}
         onCanPlay={() => { setPlayerLoading(false); if (wantsPlayback.current && audio.current?.paused) playAudio(); }}
         onWaiting={() => setPlayerLoading(true)}
-        onTimeUpdate={event => { if (event.currentTarget.paused && !event.currentTarget.seeking && !scrubbing.current) playhead.set(event.currentTarget.currentTime); }}
-        onPlay={event => { wantsPlayback.current = true; setPlayerLoading(false); playbackClock.current.reset(event.currentTarget.currentTime, performance.now()); setPlaying(true); }}
+        onTimeUpdate={event => {
+          const media = event.currentTarget;
+          // Also runs while the window is hidden, when animation frames stop.
+          if (media.paused && !media.seeking && !scrubbing.current) playhead.set(Math.min(media.currentTime, trackEnd()));
+          checkEnd(media);
+        }}
+        onPlay={event => { endedGeneration.current = -1; wantsPlayback.current = true; setPlayerLoading(false); playbackClock.current.reset(event.currentTarget.currentTime, performance.now()); setPlaying(true); }}
         onPause={() => setPlaying(false)}
-        onEnded={() => { wantsPlayback.current = false; setPlaying(false); if (!editorRef.current) advancePlayback(1, true); }}
+        onEnded={finishTrack}
         onError={() => { setPlaying(false); if (active && !active.missing) { if (!playbackFallback.current) void preparePlayback(); else if (!playbackPreparing.current) { setPlayerLoading(false); wantsPlayback.current = false; notify('Playback failed. Select the track again, or relink its file.'); } } }}/>
       {!editor && <PlayerBar track={active} playing={playing} loading={playerLoading} wantsPlayback={wantsPlayback.current}
         canPlay={(!!active && !active.missing) || playbackOrder.length > 0} hasPrevious={(!!active && !active.missing) || !!adjacentTrack(-1)} hasNext={!!adjacentTrack(1)}

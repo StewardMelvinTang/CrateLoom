@@ -114,6 +114,38 @@ class Acquisitions(unittest.TestCase):
         with api.connect() as db:
             self.assertNotIn('ephemeral',db.execute('select review from acquisitions where id=?',(job['id'],)).fetchone()[0])
 
+    def test_youtube_dash_download_is_repacked_into_a_regular_m4a(self):
+        # YouTube serves fragmented MP4; WebKit reports those as twice their length.
+        dash=self.root/'fixture-dash.m4a'
+        subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i','sine=duration=2','-c:a','aac','-movflags','+frag_keyframe+empty_moov+default_base_moof','-brand','dash','-f','mp4','-y',str(dash)],check=True)
+        audio=dash.read_bytes()
+        probe=lambda path:json.loads(subprocess.run(['ffprobe','-v','error','-show_format','-show_streams','-of','json',str(path)],check=True,capture_output=True,text=True).stdout)
+        self.assertTrue(acquisitions.is_dash(probe(dash)))
+        signed='https://r1.googlevideo.com/videoplayback?token=ephemeral'
+        url='https://www.youtube.com/watch?v=uXn-zOt68V8'
+        data={'id':'uXn-zOt68V8','title':'Test Artist - Test Title','duration':2,'ext':'m4a','protocol':'https','format_id':'140','url':signed,'filesize':len(audio),'availability':'public'}
+        process=api.import_process
+        def run(args,timeout,**options):
+            if args[0]=='/tools/yt-dlp':return SimpleNamespace(stdout=json.dumps(data))
+            return process(args,timeout,**options)
+        def response(url,**kwargs):
+            r=Response(audio,mime='audio/mp4');r.url=signed
+            return r
+        with patch.object(youtube_audio,'executable',return_value='/tools/yt-dlp'),patch.object(api,'import_process',side_effect=run),patch.object(download_http,'open_url',side_effect=response):
+            source=providers.resolve(api,url)['candidates'][0]
+            job=self.finish(api.dispatch('acquisitions.enqueue',{'source_id':source['id'],'values':source['values']})['id'])
+        self.assertEqual(job['state'],'completed',job)
+        target=Path(job['path']);saved=probe(target)
+        self.assertFalse(acquisitions.is_dash(saved))
+        self.assertNotIn(b'moof',target.read_bytes()[:4096])
+        self.assertTrue(job['quality']['repacked']);self.assertFalse(job['quality']['converted'])
+        self.assertEqual(job['quality']['sha256'],__import__('hashlib').sha256(target.read_bytes()).hexdigest())
+        self.assertEqual(job['quality']['bytes'],target.stat().st_size)
+        self.assertAlmostEqual(float(saved['format']['duration']),float(probe(dash)['format']['duration']),places=2)
+        # The audio packets are copied unchanged.
+        stream_hash=lambda path:subprocess.run(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-c','copy','-f','hash','-hash','sha256','-'],check=True,capture_output=True,text=True).stdout
+        self.assertEqual(stream_hash(target),stream_hash(dash))
+        self.assertEqual(list((self.root/'acquisition-work').iterdir()),[])
     def test_unicode_filename_stays_within_filesystem_byte_limit(self):
         providers.CANDIDATES[self.source['id']]['value']['filename']='音楽'*90+'.wav'
         with patch.object(download_http,'open_url',side_effect=lambda *a,**k:Response(self.audio)):

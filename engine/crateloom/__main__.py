@@ -6,6 +6,7 @@ import shutil
 import json
 import math
 import os
+import re
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -250,6 +251,10 @@ def validate_analysis(data, expected_duration):
     if not isinstance(beats,list) or len(beats)>10000 or any(not isinstance(x,(int,float)) or not math.isfinite(x) or x<0 or x>=min(duration,expected_duration) for x in beats) or any(a>=b for a,b in zip(beats,beats[1:])): raise ValueError('Invalid beat positions')
     grid=data.get('grid')
     if grid is not None and (not isinstance(grid,dict) or type(grid.get('stable')) is not bool or any(not isinstance(grid.get(k),(int,float)) or isinstance(grid.get(k),bool) or not math.isfinite(grid[k]) for k in ('bpm','origin','agreement')) or not 20<=grid['bpm']<=400 or not 0<=grid['origin']<min(duration,expected_duration) or not 0<=grid['agreement']<=1): raise ValueError('Invalid tempo grid')
+    key=data.get('key')
+    if key is not None and (not isinstance(key,dict) or not isinstance(key.get('camelot'),str) or not re.fullmatch(r'(1[0-2]|[1-9])[AB]',key['camelot'])
+            or any(not isinstance(key.get(k),str) or not 0<len(key[k])<=20 for k in ('name','short'))
+            or any(not isinstance(key.get(k),(int,float)) or isinstance(key.get(k),bool) or not math.isfinite(key[k]) or not -1<=key[k]<=2 for k in ('strength','margin'))): raise ValueError('Invalid key')
     if not isinstance(waveform,dict): raise ValueError('Invalid waveform')
     peaks=waveform.get('peaks'); colors=waveform.get('rgb')
     valid=lambda x:isinstance(x,(int,float)) and math.isfinite(x) and 0<=x<=1
@@ -322,7 +327,9 @@ def _store_analysis(db, asset, job_id, key, path, data, kind):
                 db.execute("INSERT INTO sections (id,track_id,start_us,end_us,label,origin) VALUES (?,?,?,?,?,'model')",(str(uuid.uuid4()),asset['id'],start,end,suggestion['label']))
                 protected.append({'start_us':start,'end_us':end})
     else:
-        detail={'cache_path':str(path),'cache_key':key,'version':data['version'],'tempo':data['tempo'],'warnings':data['warnings'],'revision':job_id}
+        detected=data.get('key')
+        detail={'cache_path':str(path),'cache_key':key,'version':data['version'],'tempo':data['tempo'],'warnings':data['warnings'],'revision':job_id,
+                'key':{k:detected[k] for k in ('camelot','name','short','strength')} if detected else None}
         old_key=asset['detail_analysis']['cache_key'] if asset['detail_analysis'] else None
         # Preserve the user's grid for the same verified audio stream. Detected
         # anchors are retained only if they still match a newly detected beat.
@@ -436,6 +443,13 @@ def dispatch(method, p):
         if method == 'library.list': return [track(db,r['id']) for r in db.execute('SELECT id FROM tracks ORDER BY rowid DESC').fetchall()]
         if method == 'library.import':
             result,duplicate=import_track(db,p['path']);return dict(result,duplicate=duplicate)
+        if method == 'library.reveal':
+            # Only a library track's own file can be shown, never an arbitrary path.
+            t=track(db,p.get('id') if isinstance(p.get('id'),str) else '')
+            if t['missing'] or not Path(t['path']).is_file(): raise ValueError('This audio file is missing. Use Relink to locate it.')
+            if sys.platform!='darwin': raise ValueError('Showing files is available on macOS only.')
+            subprocess.run(['open','-R','--',t['path']],check=True,capture_output=True,timeout=10)
+            return {'revealed':True}
         if method == 'library.remove':
             # Library records only: the audio file on disk is never touched, and
             # derived caches (analysis, artwork, playback) are left in place.

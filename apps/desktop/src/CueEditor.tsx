@@ -439,7 +439,7 @@ export function CueEditor({track, detail, playing, audio, scrubbing, loop, locke
       <div className="trackhead-actions">
         <button title="Edit title, artist, album and cover" onClick={actions.openMetadata}><Tags size={16}/> Metadata</button>
         <Menu label="Analysis" icon={<Activity size={16}/>} align="end" title="Run beat analysis or section detection again" disabled={analysisOff} items={[
-          {label: detail ? 'Analyze beats again' : 'Analyze beats and waveform', description: 'Detects the tempo, beat positions and waveform colours.', onSelect: actions.analyze},
+          {label: detail ? 'Analyze again' : 'Analyze beats, key and waveform', description: 'Detects the tempo, key, beat positions and waveform colours.', onSelect: actions.analyze},
           sectionsAvailable && {label: 'Find sections (fast)', description: 'Estimates intro, breaks and outro from changes in energy and texture. Takes a few seconds.', onSelect: () => actions.findSections('fast')},
           detailedSections && {label: 'Find sections (detailed)', description: 'Uses a song-structure model that also labels verses and choruses. Slower.', onSelect: () => actions.findSections('model')},
         ]}/>
@@ -454,7 +454,7 @@ export function CueEditor({track, detail, playing, audio, scrubbing, loop, locke
         <button onClick={actions.cancelAnalysis}>Cancel</button>
       </> : mine && job!.state === 'failed' ? <span className="inline-error">{jobName} failed: {job!.error || 'unknown error'}. Check that the file plays, then run it again from the Analysis menu.</span>
         : mine && job!.state === 'cancelled' ? <span>{jobName} was cancelled. Run it again from the Analysis menu.</span>
-        : detail ? <span>{bpm ? `${bpm.toFixed(2)} BPM` : 'No tempo detected'} · {plural(beats.length, 'beat')} · {sectionSummary}</span>
+        : detail ? <span>{bpm ? `${bpm.toFixed(2)} BPM` : 'No tempo detected'}{track.detail_analysis?.key ? <> · <span title={`Detected key: ${track.detail_analysis.key.name}`}>{track.detail_analysis.key.camelot} ({track.detail_analysis.key.short})</span></> : ''} · {plural(beats.length, 'beat')} · {sectionSummary}</span>
         : track.detail_analysis ? <span>Loading analysis…</span>
         : <span>{track.missing ? 'Not analysed.' : queued ? 'Waiting for beat analysis…' : track.duration > ANALYSIS_MAX_SECONDS ? `Not analysed: tracks over ${ANALYSIS_MAX_SECONDS / 60} minutes are not analysed automatically. Use the Analysis menu to run it.` : 'Not analysed yet. Use the Analysis menu to detect beats and draw the waveform.'}</span>}
     </div>

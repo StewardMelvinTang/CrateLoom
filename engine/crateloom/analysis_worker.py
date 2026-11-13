@@ -7,7 +7,63 @@ import subprocess
 import sys
 import tempfile
 
-VERSION = 'librosa-0.11.0-grid-6'
+VERSION = 'librosa-0.11.0-grid-7'
+
+# Krumhansl-Kessler key profiles for C major and C minor (probe-tone ratings).
+MAJOR_PROFILE = (6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88)
+MINOR_PROFILE = (6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17)
+MAJOR_NAMES = ('C', 'D♭', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B')
+MINOR_NAMES = ('C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'B♭', 'B')
+# Below this correlation the chroma has no clear tonal centre (speech, noise, drums only).
+KEY_MIN_STRENGTH = 0.2
+# Correlation ignores scale, so a nearly flat chroma (noise) can still match a key by chance.
+# Songs measured 0.27-0.65 (standard deviation over mean of the summed chroma); white noise 0.04.
+KEY_MIN_CONTRAST = 0.12
+
+def camelot(tonic, minor):
+    """Camelot wheel code: C major is 8B, A minor is 8A; each step clockwise is a fifth up."""
+    major_tonic = (tonic + 3) % 12 if minor else tonic
+    return f"{(7 * major_tonic + 7) % 12 + 1}{'A' if minor else 'B'}"
+
+def _correlation(a, b):
+    ma, mb = sum(a) / len(a), sum(b) / len(b)
+    da, db = [x - ma for x in a], [x - mb for x in b]
+    norm = (sum(x * x for x in da) * sum(x * x for x in db)) ** 0.5
+    return sum(x * y for x, y in zip(da, db)) / norm if norm else 0.0
+
+def key_from_chroma(chroma):
+    """Best of the 24 major/minor keys for a 12-bin pitch-class profile starting at C, or None."""
+    values = [float(x) for x in chroma]
+    if len(values) != 12 or not all(x == x and x >= 0 for x in values) or max(values) <= 0:
+        return None
+    mean = sum(values) / 12
+    if (sum((x - mean) ** 2 for x in values) / 12) ** 0.5 / mean < KEY_MIN_CONTRAST:
+        return None
+    scores = []
+    for tonic in range(12):
+        for minor, profile in ((False, MAJOR_PROFILE), (True, MINOR_PROFILE)):
+            rotated = [profile[(pitch - tonic) % 12] for pitch in range(12)]
+            scores.append((_correlation(values, rotated), tonic, minor))
+    scores.sort(reverse=True)
+    strength, tonic, minor = scores[0]
+    if strength < KEY_MIN_STRENGTH:
+        return None
+    names = MINOR_NAMES if minor else MAJOR_NAMES
+    short = names[tonic].replace('♯', '#').replace('♭', 'b') + ('m' if minor else '')
+    return {'camelot': camelot(tonic, minor), 'name': f"{names[tonic]} {'minor' if minor else 'major'}",
+            'short': short, 'strength': round(strength, 3), 'margin': round(strength - scores[1][0], 3)}
+
+def estimate_key(np, librosa, y, rate):
+    """Key from the summed harmonic chroma of the whole track.
+
+    Drums are removed by median filtering the constant-Q spectrum (harmonic/percussive
+    separation), which is much cheaper than separating the waveform and gives the same keys.
+    """
+    tuning = librosa.estimate_tuning(y=y, sr=rate)
+    spectrum = np.abs(librosa.cqt(y, sr=rate, hop_length=1024, bins_per_octave=36, n_bins=36 * 7, tuning=tuning))
+    harmonic, _ = librosa.decompose.hpss(spectrum, kernel_size=(9, 31))
+    chroma = librosa.feature.chroma_cqt(C=harmonic, sr=rate, bins_per_octave=36, n_chroma=12, norm=None)
+    return key_from_chroma(chroma.sum(axis=1))
 
 def write_json(path, value):
     path = Path(path)
@@ -107,6 +163,8 @@ def run(source, output, status, expected_duration):
         grid = None
     if grid and grid['stable']:
         bpm = grid['bpm']
+    stage('Detecting key')
+    key = estimate_key(np, librosa, y, rate)
     stage('Building frequency waveform')
     # STFT-derived low/mid/high energy (not section or instrument labels).
     hop = 512
@@ -139,7 +197,7 @@ def run(source, output, status, expected_duration):
     signal = {'encoding':'i16le-minmax', 'hop':signal_hop, 'rate':rate,
               'data':base64.b64encode(packed.tobytes()).decode('ascii')}
     result = {'version': VERSION, 'duration': len(y) / rate, 'tempo': round(bpm, 3) if bpm > 0 and np.isfinite(bpm) else None,
-              'beats': beat_values, 'grid': grid, 'downbeats': None, 'sections': None,
+              'beats': beat_values, 'grid': grid, 'key': key, 'downbeats': None, 'sections': None,
               'waveform': {'signal':signal, 'peaks': [round(float(v), 4) for v in peaks], 'rgb': [[round(float(v), 3) for v in row] for row in colours]},
               'warnings': ['Beat positions are estimates; downbeats, meter and song sections are not detected.']
                           + ([] if grid and grid['stable'] else ['The tempo is not steady enough for a straight grid; detected beats are shown.'])}

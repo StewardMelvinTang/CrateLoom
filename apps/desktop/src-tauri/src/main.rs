@@ -63,6 +63,7 @@ async fn engine_call(
         "playlists.save",
         "playlists.delete",
         "library.remove",
+        "library.reveal",
         "metadata.get",
         "metadata.reload",
         "metadata.save",
@@ -306,7 +307,7 @@ mod tests {
             let quoted = format!("\"{}\"", method);
             assert!(bridge.split("if !METHODS").next().unwrap().contains(&quoted), "Missing method: {}", method);
         }
-        for method in ["metadata.batch.start", "metadata.batch.get", "metadata.batch.latest", "metadata.batch.cancel", "sets.cancel_task", "sets.cancel_scan", "sets.recognize"] {
+        for method in ["metadata.batch.start", "metadata.batch.get", "metadata.batch.latest", "metadata.batch.cancel", "sets.cancel_task", "sets.cancel_scan", "sets.recognize", "library.reveal"] {
             assert!(frontend.contains(method));
             assert!(bridge.split("if !METHODS").next().unwrap().contains(&format!("\"{}\"",method)));
         }

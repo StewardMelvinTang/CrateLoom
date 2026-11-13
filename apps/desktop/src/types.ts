@@ -10,7 +10,9 @@ export type AnalysisData = {
   waveform: {peaks: number[]; rgb: number[][]; signal?: {encoding: string; hop: number; rate: number; data: string}};
   warnings: string[];
 };
-export type ImportItem = {sequence: number; path: string; state: string; track_id: string | null; error: string | null};
+/** Detected key: Camelot code (8A), full name (A minor) and rekordbox short form (Am). */
+export type TrackKey = {camelot: string; name: string; short: string; strength: number};
+export type ImportItem ={sequence: number; path: string; state: string; track_id: string | null; error: string | null};
 export type ImportJob = {id: string; state: string; total: number; processed: number; imported: number; duplicates: number; failed: number; current: string; error: string | null; cursor: number; items: ImportItem[]};
 export type GridState = {bpm: number | null; origin_us: number | null; anchor_us: number | null; offset_us: number};
 export type Job = {id: string; track_id: string; state: string; stage: string; error: string | null; kind: 'beat' | 'structure'};
@@ -20,7 +22,7 @@ export type Track = {
   sample_rate: number | null; missing: boolean; cues: Cue[]; sections: Section[]; structure_analysis: StructureAnalysis | null;
   grid_anchor_us: number | null; grid_cache_key: string | null; grid_offset_us: number; grid_bpm: number | null;
   grid_origin_us: number | null; fixed_grid_key: string | null; offset_cache_key: string | null;
-  detail_analysis: null | {cache_path: string; cache_key: string; tempo: number | null; revision?: string; version?: string};
+  detail_analysis: null | {cache_path: string; cache_key: string; tempo: number | null; revision?: string; version?: string; key?: TrackKey | null};
   analysis: null | {peaks: number[]; tempo: null};
 };
 

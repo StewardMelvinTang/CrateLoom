@@ -54,6 +54,7 @@ class AnalysisJobs(unittest.TestCase):
                 self.assertTrue(any(lo>0 or hi<0 for lo,hi in pairs))  # actual signed oscillations
                 self.assertTrue(all(lo<=hi for lo,hi in pairs))
                 self.assertIsNone(data['sections']); self.assertIsNone(data['downbeats'])
+                self.assertIn('key', data); self.assertEqual(t['detail_analysis']['key'], data['key'] and {k: data['key'][k] for k in ('camelot','name','short','strength')})
                 anchor=round(data['beats'][0]*1000000)
                 grid=call('grid.set',{'id':t['id'],'anchor_us':anchor}); self.assertEqual(grid['grid_anchor_us'],anchor)
                 shifted=call('grid.offset',{'id':t['id'],'offset_us':10000}); self.assertEqual(shifted['grid_offset_us'],10000)

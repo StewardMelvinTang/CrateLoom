@@ -35,7 +35,7 @@ The tracker's tempo is quantized to candidates several BPM apart. Analysis now f
 
 Six tracks from a disposable copy of the owner's library, old value then new: 126.048 → 127.0, 139.675 → 140.0, 135.999 → 135.0, 123.047 → 122.977, 123.047 → 122.694 (agreement 0.998), and one track left on detected beats (agreement 0.323). These are measurements on six files, not an accuracy benchmark; no reference BPM list was used.
 
-Analysis version is `librosa-0.11.0-grid-6`, reported in the handshake. Existing tracks are re-analysed when opened, or in bulk through Analyze beats in the library. The queue is driven by the window; it slows while the window is hidden.
+Analysis version was `librosa-0.11.0-grid-6` at this point (now `grid-7`, which adds key detection), reported in the handshake. Existing tracks are re-analysed when opened, or in bulk through Analyze beats in the library. The queue is driven by the window; it slows while the window is hidden.
 
 ## Interface
 
@@ -165,3 +165,27 @@ An adversarial review confirmed these defects, and each is now fixed:
 - Two gaps listed under "Known gaps left open" are now closed:
   - a list combined with recognition has a resumable checkpoint (`sets.recognize`);
   - metadata lookup and set import share one MusicBrainz pacer.
+
+## Playback end, key analysis and the track table (November 13)
+
+### Tracks did not move on and the time ran past the end
+
+Every track in the library is a YouTube download saved exactly as YouTube serves it: a fragmented MP4 (`major_brand=dash`, `moof` fragments). WebKit, the app's web view, reports these files as twice their real length (measured in WebKit: a 188.76 s file reported as 377.46 s; in the preview, "NOKIA", 4:01, reported as 482.09 s). Positions inside the file are correct (audio energy at 30, 100 and 150 s matches a repacked copy); after the music the element keeps "playing" silence until the doubled length, so `ended` fires only then.
+
+- The player now treats the library's measured duration (ffprobe) as the end: on `timeupdate` (which keeps firing while the window is hidden) and on each animation frame, playback past that point is handled as the end of the track, once per track. The clock is clamped to it, and Play after the end starts from the beginning.
+- New YouTube downloads are repacked into a regular M4A after verification (`ffmpeg -c copy -movflags +faststart`, audio packets unchanged; the job records `repacked: true` and the new size and SHA-256). Existing files are not changed.
+- Verified with the real engine and a real track in WebKit: after seeking to 3 s before the end, the clock stopped at 4:00 and the next track started 3.5 s later. The harness checks the same with an 8 s file listed as 2 s.
+
+### Key detection
+
+Beat analysis now also detects the key (`librosa-0.11.0-grid-7`). The constant-Q spectrum (36 bins per octave, 7 octaves, tuning estimated) is median-filtered to remove drums (harmonic/percussive separation on the spectrum: about 1 s per track instead of 5-19 s for separating the waveform, same answers on 16 library tracks), summed into a pitch-class profile and correlated with the Krumhansl-Kessler major and minor profiles. A flat profile (white noise measured 0.04 standard deviation over mean, songs 0.27-0.65) or a best correlation under 0.2 gives no key. Results are stored with the analysis as Camelot code, name and rekordbox short name; the rekordbox export writes `Tonality`.
+
+Not verified against a labelled dataset (none is available offline). On 16 library songs the detected keys match the documented key or its relative major/minor (same Camelot number) for the songs where the key is well established (for example "If I Ain't Got You" G major 9B, "Levels" E major 12B for C♯ minor 12A, "Feel So Close" G major 9B). Existing tracks get a key when re-analysed: "Analyze tempo & key" in the library, or by opening a track.
+
+### Track table
+
+- Every column header sorts: first click ascending, then descending, then back to the library or playlist order. Empty values (no tempo, no key, no artist) stay last. Key sorts around the Camelot wheel (1A, 1B, 2A…). The sort is remembered; Next and Previous follow the sorted order; a sorted playlist cannot be reordered by hand ("Clear the sort to reorder").
+- Columns other than Title have a drag handle on their left edge (Title takes the remaining width), with arrow keys in 8 px steps and double-click to reset. Widths are remembered.
+- Right-click a track (or press the menu key) for Copy title, Copy artist, Copy artist and title, and Reveal in Finder. Reveal goes through the engine (`library.reveal`), which only shows a library track's own file.
+
+Checks: engine suite 258 tests OK (1 skipped), tsc clean, frontend tests 14 passed, interaction harness exit 0 on Chromium and WebKit with new sorting, resizing, context menu and track-end checks.

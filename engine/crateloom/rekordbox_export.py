@@ -54,6 +54,9 @@ def document(tracks, paths, name, version):
         grid = reviewed_grid(track)
         if grid:
             attrs['AverageBpm'] = grid['Bpm']
+        key_info = (track.get('detail_analysis') or {}).get('key')
+        if key_info and key_info.get('short'):
+            attrs['Tonality'] = key_info['short']
         item = ET.SubElement(collection,'TRACK',**attrs)
         if grid:
             ET.SubElement(item, 'TEMPO', **grid)
