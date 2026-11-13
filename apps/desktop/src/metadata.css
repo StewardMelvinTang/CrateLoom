@@ -9,9 +9,65 @@
 .metadata-auto-note strong { font-weight: 600; }
 .metadata-window .metadata-field-error { display: flex; align-items: center; gap: 5px; margin-top: 4px; color: var(--text); font-size: 11px; line-height: 1.4; }
 .metadata-fields input[aria-invalid=true] { border-color: var(--text); }
-.metadata-window .metadata-staged { margin: 14px 0 0; font-size: 12px; color: var(--text); }
-.metadata-artwork small { line-height: 1.4; }
-.metadata-lookup small { line-height: 1.4; }
+
+/* Metadata window: a fixed frame with two columns that scroll on their own.
+   Nothing that loads (track, cover, matches) can change the size of the frame. */
+.metadata-window.metadata-editor { width: min(1040px, calc(100vw - 48px)); height: min(720px, calc(100dvh - 88px)); max-height: none; padding: 0; overflow: hidden; display: flex; flex-direction: column; box-shadow: 0 10px 45px var(--shadow); }
+.metadata-editor > .metadata-review-head { padding: 14px 18px; }
+.metadata-editor-notices { flex: none; max-height: 40%; overflow: auto; padding: 0 18px; border-bottom: 1px solid var(--line); }
+.metadata-editor-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 11fr) minmax(0, 10fr); }
+.metadata-details { min-width: 0; overflow: auto; padding: 16px 18px; }
+.metadata-details > .metadata-auto-note { margin: 0 0 14px; }
+.metadata-form { display: flex; align-items: flex-start; gap: 18px; }
+.metadata-editor .metadata-fields { flex: 1; min-width: 0; align-content: start; }
+
+/* The cover is the control for every cover action. */
+.metadata-cover { width: 160px; flex: none; display: grid; gap: 7px; }
+.metadata-cover small { line-height: 1.4; }
+.metadata-cover .menu { display: block; }
+.metadata-cover .metadata-cover-button { position: relative; display: block; width: 160px; height: 160px; min-height: 0; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+.metadata-cover .metadata-cover-button:hover:not(:disabled), .metadata-cover .menu[data-open=true] .metadata-cover-button { border-color: var(--text); }
+.metadata-cover-button img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.metadata-cover-button .menu-chevron { display: none; }
+.metadata-cover-empty { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.metadata-cover-hint { position: absolute; inset: auto 0 0 0; display: flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 4px; background: var(--surface); border-top: 1px solid var(--line); color: var(--text); font-size: 11px; opacity: 0; transition: opacity 140ms ease-out; }
+.metadata-cover-button:hover:not(:disabled) .metadata-cover-hint, .metadata-cover-button:focus-visible .metadata-cover-hint, .metadata-cover .menu[data-open=true] .metadata-cover-hint { opacity: 1; }
+.metadata-cover-badge { position: absolute; right: 6px; bottom: 6px; display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--text); }
+@media (hover: none) { .metadata-cover-hint { opacity: 1; } }
+.metadata-cover-busy { font-size: 11px; color: var(--muted); }
+
+/* Catalog matches */
+.metadata-sources { min-width: 0; min-height: 0; display: flex; flex-direction: column; padding: 16px 18px 0; border-left: 1px solid var(--line); }
+.metadata-sources-head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.metadata-sources-head h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.metadata-sources-head button { padding: 5px 9px; font-size: 12px; }
+.metadata-window p.metadata-lookup-status { flex: none; height: 18px; margin: 8px 0; font-size: 11px; line-height: 18px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.metadata-editor .metadata-matches { flex: 1; min-height: 0; overflow: auto; align-content: start; padding: 0 4px 14px 0; margin-right: -8px; }
+.metadata-editor .metadata-matches > p { margin: 4px 0; line-height: 1.5; }
+.metadata-editor .metadata-excluded-toggle { margin-top: 4px; justify-self: start; }
+.metadata-skeleton { display: block; border-radius: 6px; background: var(--accent-soft); animation: metadata-skeleton 1.4s ease-in-out infinite alternate; }
+.metadata-skeleton-cover { width: 160px; height: 160px; }
+.metadata-skeleton-field { height: 51px; }
+.metadata-skeleton-match { height: 86px; border-radius: 7px; }
+@keyframes metadata-skeleton { from { opacity: .45; } to { opacity: .9; } }
+
+/* One status line and the actions */
+.metadata-editor-foot { flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 10px 18px; border-top: 1px solid var(--line); }
+.metadata-editor-foot .metadata-staged { flex: 1 1 220px; min-width: 0; min-height: 18px; margin: 0; font-size: 12px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+.metadata-editor-foot button { flex: none; font-size: 12px; }
+
+@media (max-width: 760px) {
+  /* One column: the form, then the matches, in a single scrolling body. */
+  .metadata-editor-body { display: block; overflow: auto; }
+  .metadata-details { overflow: visible; padding: 14px; }
+  .metadata-sources { display: block; padding: 14px; border-left: 0; border-top: 1px solid var(--line); }
+  .metadata-editor .metadata-matches { overflow: visible; min-height: 120px; margin-right: 0; padding-right: 0; }
+  .metadata-editor > .metadata-review-head, .metadata-editor-foot { padding-inline: 14px; }
+  .metadata-editor-notices { padding-inline: 14px; }
+  .metadata-form { gap: 14px; }
+  .metadata-cover, .metadata-cover .metadata-cover-button, .metadata-skeleton-cover { width: 112px; }
+  .metadata-cover .metadata-cover-button, .metadata-skeleton-cover { height: 112px; }
+}
 
 /* Automatic metadata banner */
 .metadata-batch-progress > * { grid-column: 1; min-width: 0; }

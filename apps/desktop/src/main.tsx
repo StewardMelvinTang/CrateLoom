@@ -803,7 +803,7 @@ function App() {
           togglePlay: track => { if (active?.id === track.id) toggle(); else void choose(track, false, true); },
           relink: track => void relink(track),
           openMetadata: setMetadataIds, writeTags: setTagWriteIds,
-          autoMetadata: ids => void metadataBatch.start(ids),
+          autoMetadata: (ids, writeTags) => void metadataBatch.start(ids, writeTags),
           addToPlaylist, newPlaylist: newPlaylistFromSelection, removeFromPlaylist,
           renamePlaylist: () => setRenaming(true), deletePlaylist, removeFromLibrary,
           exportTracks: (selector, name, copyAudio) => void exportTracks(selector, name, copyAudio),

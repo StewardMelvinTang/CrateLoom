@@ -104,6 +104,11 @@ def fetch_cover(api,source,artwork_url=None):
     try:return cached_cover(api,api.ROOT/'artwork'/('release-'+release+'-1200.image'),lambda:request('https://coverartarchive.org/release/'+release+'/front-1200',5*1024*1024))
     except Exception as error:raise ValueError('No usable front cover was found for this release. Choose a local image instead.') from error
 
+def tag_writer_python():
+    python=os.environ.get('CRATELOOM_METADATA_PYTHON')
+    if not python or not Path(python).is_file():raise ValueError('Tag writer unavailable. Run scripts/setup-metadata-macos.sh and restart.')
+    return python
+
 def dispatch(api,db,method,p):
     if method.startswith('metadata.batch.'):
         from .metadata_batch import manager
@@ -197,8 +202,7 @@ def dispatch(api,db,method,p):
             state.update(artwork_pending=False)
             db.execute('UPDATE tracks SET metadata=? WHERE id=?',(json.dumps(state),t['id']))
             return {'track':api.track(db,t['id']),'backup':None,'written':False,**extra}
-        python=os.environ.get('CRATELOOM_METADATA_PYTHON')
-        if not python or not Path(python).is_file():raise ValueError('Tag writer unavailable. Run scripts/setup-metadata-macos.sh and restart.')
+        python=tag_writer_python()
         recipe=api.ROOT/'tag-receipts'/(uuid.uuid4().hex+'.json');output=recipe.with_suffix('.result.json')
         api.atomic(recipe,json.dumps({'path':t['path'],'expected_hash':t['file_hash'],'fields':state['pending'],'artwork_path':state.get('artwork_path') if embed else None,'write_artwork':embed,'backup_root':str(api.ROOT/'tag-backups')}).encode())
         env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parent.parent)}

@@ -23,7 +23,8 @@ export type LibraryActions = {
   relink: (track: Track) => void;
   openMetadata: (ids: string[]) => void;
   writeTags: (ids: string[]) => void;
-  autoMetadata: (ids: string[]) => void;
+  /** Look up and stage metadata; with `writeTags` each applied track is also written to its file. */
+  autoMetadata: (ids: string[], writeTags: boolean) => void;
   /** Queue beat analysis for tracks that have none from the current analyser. */
   analyze: (ids: string[]) => void;
   addToPlaylist: (playlist: Playlist, ids: string[]) => Promise<void>;
@@ -95,6 +96,9 @@ const TrackRow = React.memo(function TrackRow({track, order, selected, active, p
   </div>;
 });
 
+const AUTO_WRITE_KEY = 'autoMetadataWriteTags';
+const AUTO_WRITE_TRUTH = 'Writes only tracks where a match and a cover are found. Each file is backed up first.';
+
 export function LibraryView({tracks, playlists, playlist, query, filter, onFilter, loading, selectedIds, onSelectedIds, activeId, playing, ordering, reorder, exporting, importing, metadataBatch, unanalysed, actions}: {
   tracks: Track[]; playlists: Playlist[]; playlist: Playlist | null; unanalysed: ReadonlySet<string>; query: string; filter: LibraryFilter; onFilter: (value: LibraryFilter) => void; loading: boolean;
   selectedIds: string[]; onSelectedIds: (update: (ids: string[]) => string[]) => void; activeId: string | null; playing: boolean; ordering: boolean;
@@ -102,6 +106,8 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
 }) {
   const [copyExportAudio, setCopyExportAudio] = useState(false);
   const [explainAuto, setExplainAuto] = useState(false);
+  const [autoWrite, setAutoWrite] = useState(() => { try { return localStorage.getItem(AUTO_WRITE_KEY) === '1'; } catch { return false; } });
+  const chooseAutoWrite = (on: boolean) => { setAutoWrite(on); try { localStorage.setItem(AUTO_WRITE_KEY, on ? '1' : '0'); } catch { /* still applies until the app closes */ } };
   const [confirm, setConfirm] = useState<null | {kind: 'playlist'} | {kind: 'library'; ids: string[]}>(null);
   const [confirmBusy, setConfirmBusy] = useState(false), [confirmError, setConfirmError] = useState('');
   const [toolError, setToolError] = useState('');
@@ -139,9 +145,9 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
   const startAuto = () => {
     if (!autoTargets.length || autoBusy) return;
     if (localStorage.getItem('autoMetadataExplained') !== '1') { setExplainAuto(true); return; }
-    actions.autoMetadata([...autoTargets]);
+    actions.autoMetadata([...autoTargets], autoWrite);
   };
-  const confirmAuto = () => { localStorage.setItem('autoMetadataExplained', '1'); setExplainAuto(false); actions.autoMetadata([...autoTargets]); };
+  const confirmAuto = () => { localStorage.setItem('autoMetadataExplained', '1'); setExplainAuto(false); actions.autoMetadata([...autoTargets], autoWrite); };
   const runConfirm = async () => {
     if (!confirm) return;
     setConfirmBusy(true); setConfirmError('');
@@ -158,7 +164,7 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
   const none = selected.length === 0;
 
   return <section className="library workspace-view" data-playlist={playlist ? 'true' : undefined}>
-    <MetadataBatchProgress batch={metadataBatch} onReview={actions.openMetadata}/>
+    <MetadataBatchProgress batch={metadataBatch} onReview={actions.openMetadata} onWriteTags={actions.writeTags}/>
     <div className="library-context">
       <span className="muted library-count" role="status">{loading && !tracks.length ? 'Loading…' : count}</span>
       <Select aria-label="Show" title="Choose which tracks are listed" value={filter} onChange={event => onFilter(event.target.value as LibraryFilter)}>
@@ -181,8 +187,12 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
     </div>
     <div className="library-tools">
       <button className="auto-metadata" disabled={autoBusy || !autoTargets.length} aria-expanded={explainAuto || undefined}
-        title={`Look up title, artist, album and cover online for ${autoScopeSentence}. Results are saved in CrateLoom for review; audio files are not changed until you write tags.`}
+        title={`Look up title, artist, album and cover online for ${autoScopeSentence}. ${autoWrite ? `Results are saved in CrateLoom, and applied matches are written into the audio files after a backup.` : 'Results are saved in CrateLoom for review; audio files are not changed until you write tags.'}`}
         onClick={startAuto}><WandSparkles size={15}/> {metadataBatch.starting ? 'Starting…' : 'Auto metadata'}{autoTargets.length ? ` · ${autoScope}` : ''}</button>
+      {/* Belongs to Auto metadata and applies to its next run, so it is fixed while a run is going. */}
+      <label className="auto-write-option" title={autoBusy ? 'Applies to the next Auto metadata run.' : `After Auto metadata applies a match and cover, also write them into the audio file. ${AUTO_WRITE_TRUTH}`}>
+        <input type="checkbox" checked={autoWrite} disabled={autoBusy} aria-describedby={autoWrite ? 'auto-write-note' : undefined} onChange={event => chooseAutoWrite(event.target.checked)}/> Write tags to the files automatically</label>
+      {autoWrite && <small id="auto-write-note" className="auto-write-note">{AUTO_WRITE_TRUTH}</small>}
       {analysisTargets.length > 0 && <button className="analyze-beats"
         title={`Detect tempo, beat grid and waveform colours for ${plural(analysisTargets.length, 'track')} without a current analysis. Runs in the background, one track at a time; your cues and grid edits are kept.`}
         onClick={() => actions.analyze(analysisTargets)}><Activity size={15}/> Analyze beats · {analysisTargets.length}</button>}
@@ -203,7 +213,8 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
       </div>
     </div>
     {explainAuto && <div className="inline-explainer" role="group" aria-label="About Auto metadata">
-      <p><strong>Auto metadata</strong> looks up title, artist, album and cover online for {autoScopeSentence} and saves the best match in CrateLoom for you to review. Your audio files are not changed until you choose Write tags.</p>
+      <p><strong>Auto metadata</strong> looks up title, artist, album and cover online for {autoScopeSentence} and saves the best match in CrateLoom for you to review. {autoWrite
+        ? 'Where a match and a cover are found, it also writes them into the audio file, after backing the file up.' : 'Your audio files are not changed until you choose Write tags.'}</p>
       <button className="primary" onClick={confirmAuto}>Start</button><button onClick={() => setExplainAuto(false)}>Cancel</button>
     </div>}
     {toolError && <div className="inline-error dismissible" role="alert"><span>{toolError}</span><button className="quiet" onClick={() => setToolError('')}>Dismiss</button></div>}

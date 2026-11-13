@@ -49,13 +49,18 @@ const fs=require('fs'); const assert=require('node:assert/strict');
          item.state='needs_review';item.error='No usable album cover was found.';
          track.metadata.automatic_review={state:'needs_review',reason:item.error,candidates:[choice],warnings:[]};
        }else{
-         item.state='applied';track.metadata={values:choice.values,pending:choice.values,artwork_path:'/cover-'+track.id,artwork_pending:true,source:{provider:choice.provider,recording_id:choice.recording_id,release_id:choice.release_id},automatic:{rank:99,match_status:'strong',reviewed:false},automatic_review:{state:'applied',candidates:[choice],warnings:[],query:{title:track.title,artist:track.artist,version:''}}};
+         item.state='applied';
+         // A run started with write_tags also writes each applied track; the write itself can fail.
+         const wrote=metadataBatch.write_tags && !metadataBatch.fail_writes;
+         if(metadataBatch.write_tags)Object.assign(item,wrote?{written:true,backup:'/backups/'+track.id}:{written:false,write_error:'The file is read-only.'});
+         track.metadata={values:choice.values,pending:wrote?{}:choice.values,artwork_path:'/cover-'+track.id,artwork_pending:!wrote,source:{provider:choice.provider,recording_id:choice.recording_id,release_id:choice.release_id},automatic:{rank:99,match_status:'strong',reviewed:false},automatic_review:{state:'applied',candidates:[choice],warnings:[],query:{title:track.title,artist:track.artist,version:''}}};
        }
      });
      if(done===metadataBatch.items.length)metadataBatch.state='completed';
    }
    metadataBatch.processed=metadataBatch.items.filter(item=>!['queued','running','cancelled'].includes(item.state)).length;
    for(const state of ['applied','needs_review','failed','skipped','cancelled'])metadataBatch[state]=metadataBatch.items.filter(item=>item.state===state).length;
+   metadataBatch.written=metadataBatch.items.filter(item=>item.written===true).length;metadataBatch.write_failed=metadataBatch.items.filter(item=>item.write_error).length;
    localStorage.setItem('qaMetadataTracks',JSON.stringify(tracks));localStorage.setItem('qaMetadataBatch',JSON.stringify(metadataBatch));return copy(metadataBatch);
  };
  window.__TAURI_INTERNALS__={convertFileSrc:path=>path.startsWith('/cover')?'/__qa'+path:'/__qa/audio.wav',invoke:async(cmd,args)=>{
@@ -72,7 +77,7 @@ const fs=require('fs'); const assert=require('node:assert/strict');
  case 'imports.latest':return null;
  case 'metadata.batch.latest':return batchSnapshot();
  case 'metadata.batch.start':{
-   window.__qaMetadataStarted=p.track_ids;metadataBatch={id:'batch'+count++,state:'running',total:p.track_ids.length,started:Date.now(),duration:window.__qaSlowMetadata?15000:1400,items:p.track_ids.map(id=>({id,title:tracks.find(t=>t.id===id).title,state:'running',stage:'Finding best metadata'}))};return batchSnapshot();
+   window.__qaMetadataStarted=p.track_ids;window.__qaMetadataStartParams=copy(p);metadataBatch={id:'batch'+Date.now()+'-'+count++,write_tags:p.write_tags===true,fail_writes:!!window.__qaFailTagWrites,state:'running',total:p.track_ids.length,started:Date.now(),duration:window.__qaSlowMetadata?15000:1400,items:p.track_ids.map(id=>({id,title:tracks.find(t=>t.id===id).title,state:'running',stage:'Finding best metadata'}))};return batchSnapshot();
  }
  case 'metadata.batch.get':return batchSnapshot();
  case 'metadata.batch.cancel':metadataBatch.state='cancelling';return copy(metadataBatch);
@@ -123,6 +128,11 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  const order=()=>page.locator('.track-name strong').allTextContents();
  // WebKit ends innerText with a line break where Chromium does not.
  const text=locator=>locator.innerText().then(value=>value.trim());
+ // The metadata window must keep one frame. Sample its box on every animation frame while something loads.
+ const frameSettled=()=>page.locator('.metadata-editor').evaluate(el=>Promise.all(el.getAnimations().map(a=>a.finished.catch(()=>{}))).then(()=>{}));
+ const frameBox=()=>page.locator('.metadata-editor').evaluate(el=>{const r=el.getBoundingClientRect();return [r.x,r.y,r.width,r.height].join(',');});
+ const watchFrame=()=>page.evaluate(()=>{window.__qaFrames=new Set();window.__qaWatchFrame=true;const tick=()=>{const el=document.querySelector('.metadata-editor');if(el){const r=el.getBoundingClientRect();window.__qaFrames.add([r.x,r.y,r.width,r.height].join(','));}if(window.__qaWatchFrame)requestAnimationFrame(tick);};tick();});
+ const watchedFrames=()=>page.evaluate(()=>{window.__qaWatchFrame=false;return [...window.__qaFrames];});
  async function drag(handle,row){const a=await handle.boundingBox(),b=await row.boundingBox();assert.ok(a&&b);await page.mouse.move(a.x+a.width/2,a.y+a.height/2);await page.mouse.down();await page.mouse.move(b.x+Math.min(b.width/2,120),b.y+b.height/2,{steps:12});await page.waitForTimeout(60);await page.mouse.up();await wait();}
  await page.goto(baseUrl);
  await page.getByRole('button',{name:'Collapse sidebar',exact:true}).click();await wait();
@@ -155,16 +165,33 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await page.getByRole('button',{name:'Move Low (feat. T-Pain) up',exact:true}).click();await page.waitForTimeout(650);assert.equal((await order())[0],'Low (feat. T-Pain)');
  checks.playlist='mouse drag, keyboard, buttons, filtered move, reload persistence, failed save rollback, stale refresh on window focus cannot revert order';
  await page.getByRole('button',{name:'Edit metadata for Low (feat. T-Pain)',exact:true}).click();
- await page.getByRole('button',{name:'Find matches',exact:true}).click();await page.waitForTimeout(500);
+ await page.getByLabel('Metadata title',{exact:true}).waitFor();await frameSettled();
+ const openFrame=await frameBox();assert.equal(openFrame.split(',').slice(2).join('x'),'1040x720');
+ const columns=await page.evaluate(()=>['.metadata-details','.metadata-sources'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top};}));
+ assert.ok(columns[1].left>=columns[0].right && Math.abs(columns[1].top-columns[0].top)<1,JSON.stringify(columns));
+ await watchFrame();
+ await page.getByRole('button',{name:'Find matches',exact:true}).click();await page.locator('.metadata-skeleton-match').first().waitFor();await page.waitForTimeout(500);
  const candidate=page.locator('.metadata-match').first();assert.equal(await candidate.isEnabled(),true);
  assert.equal(await text(candidate.locator('.metadata-match-status')),'Close match');await candidate.click();
  assert.equal(await text(candidate.locator('.metadata-match-status')),'Selected');
  await page.getByRole('button',{name:'Save to library',exact:true}).click();
  await page.waitForFunction(()=>window.__qaSavedSource?.provider==='Apple Music');
  assert.equal(await page.evaluate(()=>window.__qaSavedSource.provider),'Apple Music');
- assert.equal(await page.getByRole('button',{name:'Find release cover',exact:true}).count(),1);
+ // One search control: once there are results it asks the catalogs again.
+ await page.getByRole('button',{name:'Search again',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'Find matches',exact:true}).count(),0);
+ await page.waitForFunction(()=>!document.querySelector('.metadata-sources-head button').disabled);
+ assert.deepEqual(await watchedFrames(),[openFrame]);
+ assert.match(await text(page.locator('.metadata-staged')),/^Saved in the library, not yet written to the file: /);
+ // The artwork is the cover control: keyboard opens its menu, Escape closes only the menu.
+ for(const gone of ['Choose image','Find release cover','Remove cover'])assert.equal(await page.getByRole('button',{name:gone,exact:true}).count(),0);
+ const coverButton=page.getByRole('button',{name:'Cover art: add a cover',exact:true});await coverButton.focus();await page.keyboard.press('Enter');
+ const coverMenu=page.getByRole('menu',{name:'Cover art: add a cover',exact:true});await coverMenu.waitFor();
+ assert.deepEqual((await coverMenu.getByRole('menuitem').allInnerTexts()).map(item=>item.split('\n')[0].trim()),['Choose an image file…','Use the release cover']);
+ await page.keyboard.press('Escape');await coverMenu.waitFor({state:'detached'});
+ assert.equal(await page.locator('.metadata-editor').count(),1);assert.equal(await coverButton.evaluate(el=>el===document.activeElement),true);
  await wait();await page.screenshot({path:output+'/metadata-dark.png'});
- checks.metadata='early match selectable during lookup with its plain-word grade; provider identity and fields save correctly';
+ checks.metadata='early match selectable during lookup with its plain-word grade; provider identity and fields save correctly; cover actions live in the artwork menu';
+ checks.metadataFrame='two columns in a '+openFrame.split(',').slice(2).join('x')+' frame that keeps its box from opening through skeleton rows, arriving matches and the finished lookup';
  await page.getByRole('button',{name:'Close metadata editor',exact:true}).click();
  await page.getByRole('button',{name:'Import DJ Set',exact:true}).click();await page.getByRole('button',{name:'History',exact:true}).click();await page.locator('.set-history-open').click();await wait();
  await drag(page.locator('.set-tracklist .reorder-handle').first(),page.locator('.set-tracklist > li').nth(2));
@@ -200,22 +227,34 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await autoButton.click();await explainer.getByRole('button',{name:'Start',exact:true}).click();
  await page.waitForFunction(()=>window.__qaMetadataStarted);
  assert.deepEqual(await page.evaluate(()=>window.__qaMetadataStarted),['t0','t1']);
+ // Writing to files is off unless its checkbox is ticked.
+ const autoWrite=page.getByLabel('Write tags to the files automatically',{exact:true});assert.equal(await autoWrite.isChecked(),false);
+ assert.deepEqual(await page.evaluate(()=>window.__qaMetadataStartParams),{track_ids:['t0','t1'],write_tags:false});
  assert.equal(await page.evaluate(()=>localStorage.getItem('autoMetadataExplained')),'1');
  assert.equal(await autoButton.isDisabled(),true);
  await page.locator('.metadata-batch-progress progress').waitFor();
  await wait();await page.screenshot({path:output+'/auto-metadata-running.png'});
  await page.getByText('Metadata analysis complete',{exact:true}).waitFor();
  assert.match(await page.locator('.metadata-batch-summary').innerText(),/1 applied with covers.*1 need review/);
+ assert.doesNotMatch(await page.locator('.metadata-batch-summary').innerText(),/written/);
+ assert.match(await page.locator('.metadata-batch-explain').innerText(),/Their files are unchanged until you write tags\./);
  assert.equal(await text(page.locator('.track-row .track-status').first()),'Tags not written');
  await page.getByRole('button',{name:'Review results',exact:true}).click();
  await page.getByText(/Applied automatically/).waitFor();
  assert.equal(await page.getByLabel('Metadata album',{exact:true}).inputValue(),'Automatic album');
  assert.equal(await page.locator('.metadata-match').count(),1);
  assert.equal(await page.locator('.metadata-match').getAttribute('aria-pressed'),'true');
- await page.waitForFunction(()=>{const image=document.querySelector('img[alt="Selected artwork"]');return image?.complete && image.naturalWidth>0;});
- await wait();await page.screenshot({path:output+'/auto-metadata-review-dark.png'});
+ await page.waitForFunction(()=>{const image=document.querySelector('.metadata-cover-button img');return image?.complete && image.naturalWidth>0;});
+ // A track with a cover offers to replace or remove it from the artwork itself.
+ await page.getByRole('button',{name:'Cover art: change or remove',exact:true}).click();
+ assert.deepEqual((await page.getByRole('menu',{name:'Cover art: change or remove',exact:true}).getByRole('menuitem').allInnerTexts()).map(item=>item.split('\n')[0].trim()),['Choose an image file…','Use the release cover','Remove cover']);
+ await page.keyboard.press('Escape');
+ await frameSettled();await wait();await page.screenshot({path:output+'/auto-metadata-review-dark.png'});
+ const reviewFrame=await frameBox();await watchFrame();
  await page.getByRole('button',{name:'Save and next track',exact:true}).click();
  await page.locator('.metadata-window').getByText('No usable album cover was found.',{exact:true}).waitFor();
+ await wait();assert.deepEqual(await watchedFrames(),[reviewFrame]);
+ checks.metadataFrameNext='the frame keeps its box while saving and loading the next track';
  await page.getByLabel('Metadata album',{exact:true}).fill('Reviewed second album');
  await page.getByRole('button',{name:'Save and previous track',exact:true}).click();
  await page.getByText(/Applied automatically/).waitFor();
@@ -242,9 +281,55 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
  if(await page.getByRole('button',{name:'Clear track selection',exact:true}).count())await page.getByRole('button',{name:'Clear track selection',exact:true}).click();
  await page.getByLabel('Search tracks',{exact:true}).fill('Low');assert.match(await text(autoButton),/\xb7 1 shown$/);
+ // Auto-write: the choice is remembered, sent as write_tags, and the strip says what reached the files.
+ assert.equal(await page.locator('.auto-write-note').count(),0);await autoWrite.check();
+ assert.match(await text(page.locator('.auto-write-note')),/^Writes only tracks where a match and a cover are found\. Each file is backed up first\.$/);
+ assert.equal(await page.evaluate(()=>localStorage.getItem('autoMetadataWriteTags')),'1');
+ await page.reload();await page.getByText('Metadata analysis complete',{exact:true}).waitFor();assert.equal(await autoWrite.isChecked(),true);
+ // The fixture starts every load in the dark theme; this part runs in the light one.
+ await page.getByLabel('Appearance').selectOption('light');await wait();
+ await page.getByLabel('Search tracks',{exact:true}).fill('Starships');assert.match(await text(autoButton),/\xb7 1 shown$/);await autoButton.click();
+ await page.waitForFunction(()=>window.__qaMetadataStartParams);
+ assert.deepEqual(await page.evaluate(()=>window.__qaMetadataStartParams),{track_ids:['t3'],write_tags:true});
+ await page.locator('.metadata-batch-progress progress').waitFor();assert.equal(await autoWrite.isDisabled(),true);
+ await page.getByText('Metadata analysis complete',{exact:true}).waitFor();
+ assert.match(await page.locator('.metadata-batch-summary').innerText(),/1 applied and written to files/);
+ assert.match(await page.locator('.metadata-batch-explain').innerText(),/written into their files; a backup of each original was kept\./);
+ assert.doesNotMatch(await page.locator('.metadata-batch-progress').innerText(),/unchanged until you write tags|not written/);
+ assert.equal(await text(page.locator('.track-row .track-status').first()),'');
+ await wait();await page.screenshot({path:output+'/auto-write-written-light.png'});
+ // The window in the light theme: full size at 1280x800, one column with the same frame rules at 700px.
+ await page.setViewportSize({width:1280,height:800});await page.getByRole('button',{name:'Edit metadata for Starships',exact:true}).click();
+ await page.getByLabel('Metadata title',{exact:true}).waitFor();await frameSettled();assert.equal((await frameBox()).split(',').slice(2).join('x'),'1040x712');
+ assert.equal(await text(page.locator('.metadata-staged')),'The library and the file’s tags match.');
+ await wait();await page.screenshot({path:output+'/metadata-light.png'});
+ await page.setViewportSize({width:700,height:800});await wait();
+ const narrow=await page.evaluate(()=>{const a=document.querySelector('.metadata-details').getBoundingClientRect(),b=document.querySelector('.metadata-sources').getBoundingClientRect(),f=document.querySelector('.metadata-editor').getBoundingClientRect();return {below:b.top>=a.bottom-1,width:f.width,height:f.height,inside:f.left>=0 && f.right<=innerWidth && f.top>=0 && f.bottom<=innerHeight};});
+ assert.deepEqual(narrow,{below:true,width:652,height:712,inside:true});
+ await page.screenshot({path:output+'/metadata-narrow-light.png'});
+ await page.getByRole('button',{name:'Close metadata editor',exact:true}).click();await page.locator('.metadata-window').waitFor({state:'detached'});
+ await page.setViewportSize({width:900,height:650});await wait();
+ // A write that fails keeps the applied details, says why, and leads to the Write tags dialog.
+ await page.getByLabel('Search tracks',{exact:true}).fill('One More');await page.evaluate(()=>{window.__qaFailTagWrites=true;window.__qaMetadataStartParams=null;});await autoButton.click();
+ await page.locator('.metadata-batch-progress progress').waitFor();await page.getByText('Metadata analysis complete',{exact:true}).waitFor();
+ assert.match(await page.locator('.metadata-batch-summary').innerText(),/1 applied with covers \xb7 0 written to files/);
+ const unwritten=page.locator('.metadata-batch-reasons').filter({hasText:'Why 1 was not written to its file'});
+ assert.match(await unwritten.innerText(),/One More Time\s+The file is read-only\./);
+ assert.match(await page.locator('.metadata-batch-explain').innerText(),/1 track is saved in the library only, and its file is unchanged until you write tags\./);
+ assert.equal(await text(page.locator('.track-row .track-status').first()),'Tags not written');
+ await wait();await page.screenshot({path:output+'/auto-write-failed-light.png'});
+ await page.getByRole('button',{name:'Write tags for this track…',exact:true}).click();
+ const writeDialog=page.getByRole('dialog',{name:'Write tags to files',exact:true});await writeDialog.getByText('To write · 1 file',{exact:true}).waitFor();
+ assert.match(await writeDialog.innerText(),/One More Time/);
+ // Nothing is written from here: the fixture has no tag writer, and the dialog is only closed.
+ await writeDialog.getByRole('button',{name:'Cancel',exact:true}).click();await writeDialog.waitFor({state:'detached'});
+ await page.evaluate(()=>{window.__qaFailTagWrites=false;});await autoWrite.uncheck();
+ assert.equal(await page.evaluate(()=>localStorage.getItem('autoMetadataWriteTags')),'0');assert.equal(await page.locator('.auto-write-note').count(),0);
+ checks.autoWrite='checkbox off by default, remembered across reload, sent as write_tags; results strip reports written files, a failed write with its reason, and reopens it in the Write tags dialog';
  await page.getByLabel('Search tracks',{exact:true}).fill('');assert.match(await text(autoButton),/\xb7 all 5 tracks$/);await page.evaluate(()=>window.__qaSlowMetadata=true);
  await autoButton.click();await page.getByRole('button',{name:'Cancel analysis',exact:true}).click();
  assert.equal(await explainer.count(),0);assert.equal((await page.evaluate(()=>window.__qaMetadataStarted)).length,5);
+ assert.equal((await page.evaluate(()=>window.__qaMetadataStartParams)).write_tags,false);
  await page.getByText('Metadata analysis cancelled',{exact:true}).waitFor();
  assert.equal(await autoButton.isEnabled(),true);
  assert.match(await page.locator('.metadata-batch-progress').innerText(),/5 tracks left unchanged/);
@@ -332,7 +417,14 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  assert.equal(await page.getByRole('button',{name:'Review results',exact:true}).isDisabled(),true);
  await page.getByLabel('Select Low (feat. T-Pain)',{exact:true}).check();await page.getByRole('button',{name:'Edit metadata',exact:true}).click();
  await page.getByLabel('Metadata title',{exact:true}).waitFor();await wait();
+ await frameSettled();
  const panelBounds=await page.locator('.metadata-window').boundingBox();assert.ok(panelBounds.x>=0 && panelBounds.x+panelBounds.width<=600 && panelBounds.y>=0 && panelBounds.y+panelBounds.height<=540,JSON.stringify(panelBounds));
+ // Under 760px the matches sit below the form in one scrolling column, and the frame still holds while they load.
+ const stacked=await page.evaluate(()=>{const a=document.querySelector('.metadata-details').getBoundingClientRect(),b=document.querySelector('.metadata-sources').getBoundingClientRect(),body=document.querySelector('.metadata-editor-body');return {below:b.top>=a.bottom-1,sameLeft:Math.abs(a.left-b.left)<1,overflow:body.scrollWidth>body.clientWidth};});
+ assert.deepEqual(stacked,{below:true,sameLeft:true,overflow:false});
+ const snappedFrame=await frameBox();await watchFrame();
+ await page.getByRole('button',{name:'Search again',exact:true}).click();await page.locator('.metadata-skeleton-match').first().waitFor();await page.locator('.metadata-match').first().waitFor();await wait();
+ assert.deepEqual(await watchedFrames(),[snappedFrame]);
  await wait();await page.screenshot({path:output+'/metadata-snapped-dark.png'});
  await page.getByRole('button',{name:'Close metadata editor',exact:true}).click();await page.locator('.metadata-window').waitFor({state:'detached'});
  await page.getByRole('button',{name:'Clear track selection',exact:true}).click();

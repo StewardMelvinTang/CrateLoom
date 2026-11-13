@@ -85,6 +85,10 @@ class BatchManager:
         job['processed'] = sum(item['state'] not in ('queued', 'running', 'cancelled') for item in job['items'])
         for state in ('applied', 'needs_review', 'failed', 'skipped', 'cancelled'):
             job[state] = sum(item['state'] == state for item in job['items'])
+        # Counted only from this run's own writes; journals from before the
+        # option existed have no such fields and report zero.
+        job['written'] = sum(item.get('written') is True for item in job['items'])
+        job['write_failed'] = sum(bool(item.get('write_error')) for item in job['items'])
         for item in job['items']:
             item.pop('baseline', None)
         return job
@@ -99,6 +103,12 @@ class BatchManager:
                 ids = params.get('track_ids')
                 if not isinstance(ids, list) or not 1 <= len(ids) <= 5000 or any(not isinstance(tid, str) for tid in ids) or len(set(ids)) != len(ids):
                     raise ValueError('Choose between 1 and 5000 distinct library tracks.')
+                write_tags = params.get('write_tags', False)
+                if not isinstance(write_tags, bool):
+                    raise ValueError('write_tags must be true or false.')
+                if write_tags:
+                    # Fail before any lookup instead of once per track.
+                    preparation.tag_writer_python()
                 items = []
                 for tid in ids:
                     row = db.execute('SELECT id,title,artist,metadata,file_hash FROM tracks WHERE id=?', (tid,)).fetchone()
@@ -107,7 +117,7 @@ class BatchManager:
                     items.append({'id': tid, 'title': row['title'], 'state': 'queued', 'error': None, 'baseline': fingerprint(dict(row))})
                 self.stop.clear()
                 self.job = {'id': str(uuid.uuid4()), 'state': 'running', 'total': len(items),
-                            'started_at': time.time(), 'items': items}
+                            'started_at': time.time(), 'write_tags': write_tags, 'items': items}
                 self.save()
                 pending = self.snapshot()
                 RUNNER.submit(self.run)
@@ -139,6 +149,14 @@ class BatchManager:
         }).encode())
 
     def process(self, index):
+        staged_revision = self.apply(index)
+        # Outside apply()'s error handling: nothing that goes wrong while
+        # writing may turn an applied track into a failed one.
+        if staged_revision and self.job.get('write_tags'):
+            self.write_applied(index, self.job['items'][index]['id'], staged_revision)
+
+    def apply(self, index):
+        """Stage the best match and cover; return the staged revision if applied."""
         item = self.job['items'][index]
         result = {}
         track = None
@@ -219,11 +237,16 @@ class BatchManager:
                     metadata['automatic'] = {'job_id': self.job['id'], 'rank': selected['rank'],
                                              'match_status': selected['match_status'], 'applied_at': time.time(), 'reviewed': False}
                     db.execute('UPDATE tracks SET metadata=? WHERE id=?', (json.dumps(metadata), track['id']))
+                staged_revision = preparation.revision(metadata, updated['file_hash'])
                 self.update(index, state='applied', provider=source['provider'], rank=selected['rank'])
                 try:
                     self.store_review(updated, result, 'applied', selected=selected)
                 except OSError:
-                    self.update(index, error='Applied metadata and cover. Saved match details could not be cached.')
+                    try:
+                        self.update(index, error='Applied metadata and cover. Saved match details could not be cached.')
+                    except OSError:
+                        pass
+                return staged_revision
         except Exception as error:
             if track:
                 try:
@@ -231,6 +254,34 @@ class BatchManager:
                 except OSError:
                     pass
             self.update(index, state='cancelled' if self.stop.is_set() else 'failed', error=str(error))
+
+    def write_applied(self, index, track_id, staged_revision):
+        # Only reached for a track this run just applied. The staged metadata
+        # stays whatever happens here; a failed write is recorded, not undone.
+        changes = {'written': False}
+        try:
+            with self.lock:
+                if self.stop.is_set():
+                    self.update(index, **changes)
+                    return
+                self.update(index, stage='Writing tags to the file')
+            # The write runs outside the lock so Stop and progress stay responsive;
+            # a write that has started always runs to its verified end.
+            with self.api.connect() as db:
+                # The revision makes an edit saved since the apply win over this write.
+                outcome = preparation.dispatch(self.api, db, 'metadata.write', {'id': track_id, 'revision': staged_revision})
+            changes = {'written': True, 'backup': outcome.get('backup')}
+            if 'artwork_embedded' in outcome:
+                changes['artwork_embedded'] = outcome['artwork_embedded']
+            if outcome.get('note'):
+                changes['write_note'] = outcome['note']
+        except Exception as error:
+            changes = {'written': False, 'write_error': str(error) or 'Tag write failed'}
+        try:
+            self.update(index, **changes)
+        except OSError:
+            # The journal could not be saved; the in-memory item is already updated.
+            pass
 
     def run(self):
         try:
