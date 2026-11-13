@@ -14,11 +14,12 @@ CONTROLS = {}
 
 
 class ScanControl:
-    def __init__(self, api, report_id=None):
+    def __init__(self, api, report_id=None, stop=None):
         self.api = api
         self.report_id = report_id
         self.job_id = None
-        self.stop = threading.Event()
+        # Background work shares one stop Event per report instead of one per job.
+        self.stop = stop or threading.Event()
         self.lock = threading.RLock()
         self.publisher = lambda fields: None
         self.progress = {'stage': 'Preparing scan', 'completed': 0, 'total': None, 'unit': 'steps'}
@@ -27,6 +28,8 @@ class ScanControl:
         self.result = None
         self.closing = False
         self.youtube_browser = None
+        # The worker's classified failure from the last recognition pass, if any.
+        self.failure = None
 
     def attach(self, job_id, publisher):
         self.job_id = job_id
@@ -58,12 +61,15 @@ class ScanControl:
                 self.publisher({'state': 'cancelling', 'stage': 'Stopping scan'})
 
     @contextmanager
-    def activate(self):
+    def activate(self, register=True):
+        # ``register=False`` lends this control's cancellation to a helper thread
+        # without listing it again as the report's running scan.
         previous = getattr(LOCAL, 'control', None)
         previous_cancel = getattr(self.api.IMPORT_CONTEXT, 'cancel', None)
         LOCAL.control = self
         self.api.IMPORT_CONTEXT.cancel = self.stop
-        if self.report_id:
+        register = register and self.report_id
+        if register:
             with LOCK:
                 CONTROLS[(str(Path(self.api.ROOT).resolve()), self.report_id)] = self
         try:
@@ -71,7 +77,7 @@ class ScanControl:
         finally:
             LOCAL.control = previous
             self.api.IMPORT_CONTEXT.cancel = previous_cancel
-            if self.report_id:
+            if register:
                 with LOCK:
                     key = (str(Path(self.api.ROOT).resolve()), self.report_id)
                     if CONTROLS.get(key) is self:
@@ -137,6 +143,9 @@ def shutdown():
         controls = list(set(CONTROLS.values()))
     for control in controls:
         control.cancel(closing=True)
+    # Source discovery is not a scan job, but it runs yt-dlp under the same cancellation.
+    from .set_discovery import stop_all
+    stop_all()
 
 
 def run_process(api, args, timeout, on_line=lambda line: None, on_poll=lambda: None):

@@ -6,10 +6,11 @@ import threading
 import time
 import urllib.parse
 
+from . import providers
 from .metadata_matching import primary_artist, query_plan, rank_candidates
 
 POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='metadata-catalog')
-GATES = {'MusicBrainz': threading.Lock(), 'Apple Music': threading.Lock()}
+GATES = {'MusicBrainz': providers.MUSICBRAINZ_LOCK, 'Apple Music': threading.Lock()}
 LAST = {'MusicBrainz': 0.0, 'Apple Music': 0.0}
 INTERVALS = {'MusicBrainz': 1.1, 'Apple Music': 3.1}
 
@@ -29,12 +30,18 @@ def cached_request(api, request, provider, url, refresh=False):
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
     try:
-        with GATES[provider]:
-            delay = INTERVALS[provider] - (time.monotonic() - LAST[provider])
-            if delay > 0:
-                time.sleep(delay)
-            LAST[provider] = time.monotonic()
-            payload = json.loads(request(url, timeout=6))
+        if provider == 'MusicBrainz':
+            # One pacer for the whole engine: set source lookups share the same rate limit.
+            with providers.musicbrainz_turn():
+                providers.pace_musicbrainz(INTERVALS[provider])
+                payload = json.loads(request(url, timeout=6))
+        else:
+            with GATES[provider]:
+                delay = INTERVALS[provider] - (time.monotonic() - LAST[provider])
+                if delay > 0:
+                    time.sleep(delay)
+                LAST[provider] = time.monotonic()
+                payload = json.loads(request(url, timeout=6))
         field = 'recordings' if provider == 'MusicBrainz' else 'results'
         if not isinstance(payload, dict) or not isinstance(payload.get(field), list):
             raise ValueError('Invalid catalog response')

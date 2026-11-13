@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from urllib.parse import parse_qs, urlsplit
 
@@ -13,6 +14,31 @@ from .acquisitions import AudioTransfer
 from .shazam_worker import MAX_DURATION
 
 EXTENSIONS = ('m4a','webm','opus','ogg','mp3','aac','mp4')
+# One acquisition per mix: a second caller waits, then reuses the saved audio.
+OBTAIN_LOCKS = {}
+OBTAIN_GUARD = threading.Lock()
+# Mix downloads in progress. Background searches wait for zero so they do not compete for bandwidth.
+ACQUIRING = 0
+IDLE = threading.Condition()
+
+
+def watch_lock(key):
+    with OBTAIN_GUARD:
+        return OBTAIN_LOCKS.setdefault(key, threading.Lock())
+
+
+def wait_until_idle(timeout):
+    """True once no mix audio is being acquired; False if that takes longer than timeout seconds."""
+    with IDLE:
+        return IDLE.wait_for(lambda: ACQUIRING <= 0, timeout)
+
+
+def acquiring(change):
+    global ACQUIRING
+    with IDLE:
+        ACQUIRING += change
+        if ACQUIRING <= 0:
+            IDLE.notify_all()
 
 
 class ScanTransfer(AudioTransfer):
@@ -148,6 +174,16 @@ def obtain(api, watch, check):
         raise ValueError('Choose a single public YouTube mix.')
     watch = reference[2]
     vid = parse_qs(urlsplit(watch).query)['v'][0]
+    lock = watch_lock((str(api.ROOT), vid))
+    while not lock.acquire(timeout=.2):
+        check()
+    try:
+        return saved_audio(api, watch, vid) or download(api, reference, watch, vid, check)
+    finally:
+        lock.release()
+
+
+def saved_audio(api, watch, vid):
     folder = api.ROOT/'set-audio'/vid
     manifest = folder/'source.json'
     try:
@@ -160,7 +196,20 @@ def obtain(api, watch, check):
             return source
     except (OSError,ValueError,KeyError):
         pass
+
+
+def download(api, reference, watch, vid, check):
     check()
+    acquiring(1)
+    try:
+        return transfer_mix(api, reference, watch, vid, check)
+    finally:
+        acquiring(-1)
+
+
+def transfer_mix(api, reference, watch, vid, check):
+    folder = api.ROOT/'set-audio'/vid
+    manifest = folder/'source.json'
     folder.mkdir(parents=True,exist_ok=True)
     last_error = None
     failures = []

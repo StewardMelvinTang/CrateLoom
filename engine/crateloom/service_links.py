@@ -1,7 +1,7 @@
 """Public track references from provider oEmbed endpoints. Never fetch streams."""
 import json
 import re
-from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from . import download_http
 
@@ -14,12 +14,31 @@ ENDPOINTS = {
     'Spotify': 'https://open.spotify.com/oembed',
     'SoundCloud': 'https://soundcloud.com/oembed',
 }
+# Share-menu and campaign parameters; they never change which mix or playlist a link opens.
+TRACKING = {'si', 'pp', 'feature', 'ref', 'fbclid', 'igsh', 'igshid', 't'}
 GUIDANCE = {
     'YouTube': 'Use a direct audio file from the creator to import this track.',
     'YouTube Music': 'Use a direct audio file from the creator to import this track.',
     'Spotify': 'Use an independently obtained audio file to import this track.',
     'SoundCloud': 'If the creator offers Download file, use it on SoundCloud, then add the file here.',
 }
+
+
+def strip_tracking(url):
+    """Drop share and campaign parameters; v, list and everything else stay as written."""
+    if not isinstance(url, str):
+        return url
+    try:
+        parsed = urlsplit(url.strip())
+    except ValueError:
+        return url
+    if not parsed.query:
+        return url.strip()
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    kept = [(name, value) for name, value in pairs if name.lower() not in TRACKING and not name.lower().startswith('utm_')]
+    if len(kept) == len(pairs):
+        return url.strip()
+    return urlunsplit(parsed._replace(query=urlencode(kept)))
 
 
 def identify(url):

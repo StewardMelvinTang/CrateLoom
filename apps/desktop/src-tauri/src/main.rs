@@ -96,6 +96,7 @@ async fn engine_call(
         "sets.cancel_scan",
         "sets.resume_scan",
         "sets.auto_scan",
+        "sets.recognize",
         "sets.prepare",
         "sets.add_source",
         "sets.add_local",
@@ -305,7 +306,7 @@ mod tests {
             let quoted = format!("\"{}\"", method);
             assert!(bridge.split("if !METHODS").next().unwrap().contains(&quoted), "Missing method: {}", method);
         }
-        for method in ["metadata.batch.start", "metadata.batch.get", "metadata.batch.latest", "metadata.batch.cancel", "sets.cancel_task", "sets.cancel_scan"] {
+        for method in ["metadata.batch.start", "metadata.batch.get", "metadata.batch.latest", "metadata.batch.cancel", "sets.cancel_task", "sets.cancel_scan", "sets.recognize"] {
             assert!(frontend.contains(method));
             assert!(bridge.split("if !METHODS").next().unwrap().contains(&format!("\"{}\"",method)));
         }

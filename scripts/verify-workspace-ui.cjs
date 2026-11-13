@@ -29,7 +29,10 @@ const fs=require('fs'); const assert=require('node:assert/strict');
  const songs=[['Low (feat. T-Pain)','Flo Rida, T-Pain'],['The Days (Notion Remix)','CHRYSTAL'],["Don\u2019t Stop the Music",'MITCH DB, Level 8, MusicByDavid'],['Starships','Nicki Minaj'],['One More Time','Daft Punk']];
  const tracks=songs.map(([title,artist],i)=>({id:'t'+i,title,artist,path:'/audio.wav',duration:8,codec:location.search.includes('fallback')?'pcm_s16be':'mp3',sample_rate:44100,missing:false,cues:[],sections:[],analysis:null,structure_analysis:null,grid_offset_us:0,metadata:{values:{title,artist},pending:{},artwork_path:'/cover-0'},detail_analysis:{version:ANALYSIS_VERSION,cache_path:'',cache_key:'x'}}));
  const playlists=[{id:'p',name:'Friday selections',track_ids:JSON.parse(localStorage.getItem('qaOrder') || '["t0","t1","t2","t3","t4"]')}];
- let report={id:'set',name:'Friday selections',watch:null,youtube_browser:null,playlist_id:'p',warning:null,tracks:songs.map(([title,artist],i)=>({entry_id:'e'+i,position:i,at:i<4?i*180:null,title,artist,duration:180+i*23,artwork_path:'/cover-'+i,evidence:['Spotify'],track_id:i===0?'t0':null,playback_track_id:i===0?'t0':null,download_id:null,download_state:null,error:null,needs_review:i>0,links:[{label:'Spotify',url:'https://open.spotify.com/track/123'}],source_options:i===0?[]:Array.from({length:i===1?10:(location.search.includes('sole')?1:2)},(_,j)=>({title:j===0?`${artist} \u2014 ${title} (Extended Mix)`:`${artist} \u2014 ${title} (${['Official Audio','Official Music Video','Lyrics','Club Edit'][j%4]})`,url:`https://www.youtube.com/watch?v=${i}${j}123456789`,duration:180+j*12,compatible:true,recommended:j===0,recommendation_reason:'Extended mix'}))}))};
+ // What a running audio scan has heard but not yet placed (report.provisional).
+ const HEARD=[{at:312,end:372,title:'Nightcall',artist:'Kavinsky',samples:2},{at:401,end:430,title:'Midnight City',artist:'M83',samples:1}];
+ const IDLE_RECOGNITION={state:'none',confirmed:0,added:0,warning:null};
+ let report={id:'set',name:'Friday selections',watch:null,youtube_browser:null,playlist_id:'p',warning:null,discovery:{pending:0,running:0},recognition:IDLE_RECOGNITION,provisional:[],tracks:songs.map(([title,artist],i)=>({entry_id:'e'+i,position:i,at:i<4?i*180:null,title,artist,duration:180+i*23,artwork_path:'/cover-'+i,evidence:['Spotify'],track_id:i===0?'t0':null,playback_track_id:i===0?'t0':null,download_id:null,download_state:null,error:null,needs_review:i>0,source_search:null,links:[{label:'Spotify',url:'https://open.spotify.com/track/123'}],source_options:i===0?[]:Array.from({length:i===1?10:(location.search.includes('sole')?1:2)},(_,j)=>({title:j===0?`${artist} \u2014 ${title} (Extended Mix)`:`${artist} \u2014 ${title} (${['Official Audio','Official Music Video','Lyrics','Club Edit'][j%4]})`,url:`https://www.youtube.com/watch?v=${i}${j}123456789`,duration:180+j*12,compatible:true,recommended:j===0,recommendation_reason:'Extended mix'}))}))};
  const tasks=new Map();let count=0;
  const savedTracks=JSON.parse(localStorage.getItem('qaMetadataTracks') || 'null');if(savedTracks)tracks.splice(0,tracks.length,...savedTracks);
  let metadataBatch=JSON.parse(localStorage.getItem('qaMetadataBatch') || 'null');
@@ -85,10 +88,21 @@ const fs=require('fs'); const assert=require('node:assert/strict');
  case 'sets.scan':{window.__qaLastScanParams=copy(p);if(window.__qaScanReject){const text=window.__qaScanReject;window.__qaScanReject=null;throw new Error(text);}
    const id='scan'+count++;tasks.set(id,{scan:true,audio:p.fingerprint,url:p.url,browser:p.youtube_browser,started:Date.now(),cancelled:0});return {id,state:'running',cancellable:true,progress:{stage:'Reading published tracklist',completed:0,total:null,unit:'steps'}};}
  case 'sets.cancel_task':{const scan=tasks.get(p.task_id);scan.cancelled=Date.now();return {id:p.task_id,state:'cancelling',cancellable:true};}
- case 'sets.cancel_scan':report.scan={...report.scan,automatic:false,running:false,cancelling:false,progress:undefined};return copy(report);
+ case 'sets.cancel_scan':if('__qaSavedWarning' in window){report.warning=window.__qaSavedWarning;delete window.__qaSavedWarning;}report.scan={...report.scan,automatic:false,running:false,cancelling:false,progress:undefined};if(report.recognition.state==='running')report.recognition={...report.recognition,state:'paused'};return copy(report);
+ // Recognizing a published tracklist's audio continues as the report's own audio scan.
+ case 'sets.recognize':window.__qaRecognizeParams=copy(p);report.recognition={state:'running',confirmed:2,added:1,warning:null};report.provisional=HEARD;
+   report.scan={offset:0,duration:3783,retry_at:0,automatic:true,running:true,stalled:false,fast:true,samples:3,pending_matches:0,progress:{stage:'Identifying tracks',completed:3,total:null,unit:'samples',position:240,duration:3783,tracks_found:2}};return copy(report);
  case 'sets.auto_scan':window.__qaAutoScanParams=copy(p);if('youtube_browser' in p)report.youtube_browser=p.youtube_browser;report.scan={...report.scan,automatic:p.enabled,running:false,progress:undefined};return copy(report);
  case 'sets.list':return [{id:'set',name:report.name,playlist_id:report.playlist_id,entries:report.tracks.length,imported:1,with_download:0,offset:null,duration:null,automatic:0,created_at:null}];
- case 'sets.get':{const snapshot=copy(report);if(window.__qaStaleSetNext){window.__qaStaleSetNext=false;window.__qaStaleSetStarted=true;await new Promise(resolve=>setTimeout(resolve,400));}return snapshot;}
+ case 'sets.get':{
+   // Shazam asked the scan to wait: the engine reports when it resumes.
+   if(window.__qaShazamWait){window.__qaShazamWait=false;const resume=Date.now()/1000+95;report.scan={...report.scan,automatic:true,running:false,retry_at:resume,progress:{stage:'Waiting for Shazam',completed:300,total:1800,unit:'seconds',resume_at:resume}};}
+   // A stalled attempt (here a full disk) waits too, but not for Shazam; its raw engine text stays under Details.
+   if(window.__qaStallWait){window.__qaStallWait=false;window.__qaSavedWarning=report.warning;const resume=Date.now()/1000+95;report.warning="Partial scan. [Errno 28] No space left on device: '/Users/qa/Library/Caches/CrateLoom/set-audio'";report.scan={...report.scan,automatic:true,running:false,retry_at:resume,progress:{stage:'Waiting before the next attempt',completed:300,total:1800,unit:'seconds',resume_at:resume}};}
+   // A row with no artist but a listed link (report.listed_link), and back.
+   if(window.__qaListedRow===true){window.__qaListedRow=false;window.__qaListedArtist=report.tracks[2].artist;Object.assign(report.tracks[2],{artist:'',listed_link:true});}
+   if(window.__qaListedRow==='restore'){window.__qaListedRow=false;report.tracks[2].artist=window.__qaListedArtist;delete report.tracks[2].listed_link;}
+   const snapshot=copy(report);if(window.__qaStaleSetNext){window.__qaStaleSetNext=false;window.__qaStaleSetStarted=true;await new Promise(resolve=>setTimeout(resolve,400));}return snapshot;}
  case 'playback.prepare':{const id='playback'+count++;tasks.set(id,{end:Date.now()+350,playback:true});window.__qaPlaybackRequests=(window.__qaPlaybackRequests||0)+1;return {id,state:'running'};}
  case 'sets.artwork':{const id='art'+count++;tasks.set(id,{end:Date.now()+100});return {id,state:'running'};}
  case 'sets.add_source':{window.__qaSourceRequests=(window.__qaSourceRequests||0)+1;const id='source'+count++;tasks.set(id,{end:Date.now()+1800,entry_id:p.entry_id});return {id,state:'running'};}
@@ -102,9 +116,13 @@ const fs=require('fs'); const assert=require('node:assert/strict');
    return {metadata:copy(track.metadata)};
  }
  case 'metadata.job':{const found=tasks.get(p.id);if(found.scan){
-   if(window.__qaScanError)return {id:p.id,state:'failed',cancellable:true,result:null,error:window.__qaScanError};
+   // A failure is either the raw text of an older engine or {error, error_detail}.
+   if(window.__qaScanError){const failure=window.__qaScanError;return {id:p.id,state:'failed',cancellable:true,result:null,...(typeof failure==='string'?{error:failure}:failure)};}
    if(found.cancelled)return {id:p.id,state:Date.now()-found.cancelled>150?'cancelled':'cancelling',cancellable:true,result:null};
-   if(window.__qaFinishScan){report.watch=found.url || report.watch;report.youtube_browser=found.browser ?? null;report.scan={offset:300,duration:1800,retry_at:0,automatic:true,running:true,stalled:false,fast:true,samples:7,pending_matches:2,progress:{stage:'Identifying tracks',completed:7,total:null,unit:'samples',position:360,duration:1800,tracks_found:2}};return {id:p.id,state:'completed',cancellable:true,result:copy(report)};}
+   // A published tracklist is saved at once; sources for its entries are then looked for in the background.
+   if(window.__qaFinishPublished){report.watch=found.url || report.watch;report.youtube_browser=found.browser ?? null;report.playlist_id=null;delete report.scan;report.recognition=IDLE_RECOGNITION;report.provisional=[];report.discovery={pending:2,running:1};
+     report.tracks.forEach((row,i)=>{row.source_search=[null,'searching','ready','choose','queued'][i];});return {id:p.id,state:'completed',cancellable:true,result:copy(report)};}
+   if(window.__qaFinishScan){report.watch=found.url || report.watch;report.youtube_browser=found.browser ?? null;report.recognition=IDLE_RECOGNITION;report.discovery={pending:0,running:0};report.provisional=HEARD;report.scan={offset:300,duration:1800,retry_at:0,automatic:true,running:true,stalled:false,fast:true,samples:7,pending_matches:2,progress:{stage:'Identifying tracks',completed:7,total:null,unit:'samples',position:360,duration:1800,tracks_found:2}};return {id:p.id,state:'completed',cancellable:true,result:copy(report)};}
    return {id:p.id,state:'running',cancellable:true,progress:found.audio?{stage:'Identifying tracks',completed:7,total:null,unit:'samples',position:60,duration:3783,tracks_found:2}:{stage:'Reading playlist entries',completed:12,total:52,unit:'entries'}};
  }if(found.lookup){return {id:p.id,state:Date.now()<found.end?'running':'completed',result:{query:{title:'Low',artist:'Flo Rida,T-Pain',version:''},candidates:[{provider:'Apple Music',recording_id:'275496141',release_id:'275496110',values:{title:'Low (feat. T-Pain)',artist:'Flo Rida',album:'Mail On Sunday',genre:'Hip-Hop/Rap',date:'2007-10-09'},duration:231.4,duration_difference:1.5,match_status:'strong',reasons:[]}]}};}
 const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running'};if(task.playback)return {id:p.id,state:'completed',result:{path:'/audio.wav'}};if(task.entry_id){const row=report.tracks.find(r=>r.entry_id===task.entry_id);row.download_id='dl'+row.entry_id;row.download_state='queued';}return {id:p.id,state:'completed',result:copy(report)};}
@@ -435,13 +453,37 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await page.getByLabel('Appearance').selectOption('dark');
  await page.getByRole('button',{name:'Import DJ Set',exact:true}).click();await page.getByRole('button',{name:'New scan',exact:true}).click();
  const link=page.getByLabel('Mix or playlist link',{exact:true}),access=page.getByLabel('YouTube access',{exact:true}),scanButton=page.getByRole('button',{name:'Scan',exact:true});
+ const accessToggle=page.getByRole('button',{name:/^Access: \w+, change YouTube access$/});
  const cancelled=()=>page.getByText(/^Scan cancelled\./).waitFor();
- // The YouTube access choice belongs to a YouTube link; each way of scanning keeps its own input.
+ // One link row and one line of help: no recognition checkbox, and no token fields until something needs them.
  assert.equal(await page.getByRole('radio',{name:'A link',exact:true}).isChecked(),true);assert.equal(await page.locator('.set-access').count(),0);
- await link.fill('https://www.youtube.com/watch?v=RvRhUHTV_8k');await access.waitFor();assert.equal(await access.inputValue(),'');
+ for(const gone of ['.set-check','.set-connections','.set-token'])assert.equal(await page.locator(gone).count(),0,gone+' should not be shown');
+ assert.deepEqual(await page.locator('.set-form .set-hint').allInnerTexts(),['Reads the published tracklist; if there is none, recognizes the audio with Shazam.']);
+ // (a) Share and tracking parameters leave a pasted link at once, and the scan is sent without them.
+ await link.fill('https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n?si=abc');assert.equal(await link.inputValue(),'https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n');
+ assert.equal(await accessToggle.count(),0);
+ // (d) A Spotify authorization failure asks for a token right there, and only then.
+ await page.evaluate(()=>window.__qaScanReject='Spotify authorization failed. Check playlist access or clear the expired token.');
+ await scanButton.click();const spotifyAlert=page.getByRole('alert').filter({hasText:'Spotify authorization failed.'});await spotifyAlert.waitFor();
+ assert.deepEqual(await page.evaluate(()=>{const p=window.__qaLastScanParams;return {url:p.url,fingerprint:p.fingerprint,youtube_browser:p.youtube_browser};}),{url:'https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n',fingerprint:false,youtube_browser:null});
+ const spotifyToken=page.getByLabel('Spotify access token');assert.equal(await spotifyToken.isVisible(),true);
+ assert.equal(await page.getByRole('button',{name:'Connect and scan again',exact:true}).isDisabled(),true);
+ await spotifyAlert.getByRole('button',{name:'Dismiss message',exact:true}).click();assert.equal(await spotifyToken.count(),0);
+ // (b) The YouTube access choice belongs to a YouTube link: a toggle at the end of the link row opens it.
+ await link.fill('https://www.youtube.com/watch?v=RvRhUHTV_8k&si=share');assert.equal(await link.inputValue(),'https://www.youtube.com/watch?v=RvRhUHTV_8k');
+ assert.equal(await page.locator('.set-form-line').filter({has:link}).locator('.set-access-toggle').count(),1);
+ assert.equal(await access.count(),0);assert.equal(await text(accessToggle),'Access: Public');assert.equal(await accessToggle.getAttribute('aria-expanded'),'false');
+ await accessToggle.click();await access.waitFor();assert.equal(await access.inputValue(),'');assert.equal(await accessToggle.getAttribute('aria-expanded'),'true');
+ assert.equal(await page.locator('.set-access-guide').isVisible(),true);assert.equal(await page.locator('.set-access').getAttribute('data-error'),'false');
+ await wait();await page.screenshot({path:output+'/new-scan-access-dark.png'});
+ await accessToggle.click();assert.equal(await page.locator('.set-access').count(),0);
+ // Each way of scanning keeps its own input.
  await page.getByRole('radio',{name:'A pasted tracklist',exact:true}).check();await page.getByLabel('Tracklist',{exact:true}).waitFor();assert.equal(await link.count(),0);
+ // Recognizing a pasted list's audio needs its YouTube mix link, and the hint says so.
+ assert.match(await text(page.locator('.set-hint')),/Entries are used as written\. Add the YouTube mix link to recognize its audio from the report too\.$/);
  await page.getByRole('radio',{name:'A link',exact:true}).check();assert.equal(await link.inputValue(),'https://www.youtube.com/watch?v=RvRhUHTV_8k');
  await scanButton.click();await page.getByText('12 of 52 tracklist entries read',{exact:true}).waitFor();
+ assert.equal(await page.evaluate(()=>window.__qaLastScanParams.fingerprint),false);
  const centered=async()=>page.locator('.set-progress-stage').evaluate(stage=>{const box=stage.getBoundingClientRect(),card=stage.querySelector('.scan-progress').getBoundingClientRect();return {x:Math.abs(box.x+box.width/2-card.x-card.width/2),y:Math.abs(box.y+box.height/2-card.y-card.height/2)};});
  let alignment=await centered();assert.ok(alignment.x<2 && alignment.y<2,JSON.stringify(alignment));
  assert.equal(await link.count(),1);
@@ -454,25 +496,57 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await wait();await page.screenshot({path:output+'/tracklist-progress-dark.png'});
  await page.getByRole('button',{name:'Cancel scan',exact:true}).click();await cancelled();
  assert.equal(await link.inputValue(),'https://www.youtube.com/watch?v=RvRhUHTV_8k');
- await page.locator('.set-check input').check();
- await scanButton.click();await page.getByText('7 audio samples checked',{exact:true}).waitFor();
- assert.equal(await page.evaluate(()=>window.__qaLastScanParams.fingerprint),true);
- assert.equal(await page.getByRole('progressbar',{name:'Scan progress',exact:true}).getAttribute('value'),null);
- alignment=await centered();assert.ok(alignment.x<2 && alignment.y<2,JSON.stringify(alignment));
+ // The tracklist stage stays centred in the compact light layout.
  await page.getByLabel('Appearance').selectOption('light');await page.setViewportSize({width:900,height:650});await wait();
- alignment=await centered();await wait();await page.screenshot({path:output+'/audio-progress-compact-light.png'});assert.ok(alignment.x<2 && alignment.y<2,JSON.stringify(alignment));
+ await scanButton.click();await page.getByText('12 of 52 tracklist entries read',{exact:true}).waitFor();
+ alignment=await centered();await wait();await page.screenshot({path:output+'/tracklist-progress-compact-light.png'});assert.ok(alignment.x<2 && alignment.y<2,JSON.stringify(alignment));
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
  await page.getByRole('button',{name:'Cancel scan',exact:true}).click();await cancelled();
- await scanButton.click();await page.evaluate(()=>window.__qaFinishScan=true);
- // The finished tracklist opens as a report whose audio scan continues by itself and can be paused there.
+ // (e) A published tracklist opens at once; sources are found in the background and each entry says where its search stands.
+ await page.evaluate(()=>window.__qaFinishPublished=true);await scanButton.click();await page.locator('.set-report').waitFor();
+ const recognizeButton=page.getByRole('button',{name:'Recognize audio too',exact:true});await recognizeButton.waitFor();
+ assert.deepEqual((await page.locator('.set-tracklist .set-status').allInnerTexts()).map(item=>item.trim()),['In library','Finding sources…','Source ready','Choose a version','Waiting to search']);
+ assert.equal(await page.locator('.set-tracklist > li').nth(1).locator('.set-status .spin').count(),1);
+ assert.equal(await text(page.getByRole('button',{name:'Create playlist and find tracks',exact:true})),'Create playlist and find tracks');
+ assert.equal(await text(page.locator('.set-sources-ready')),'1 source ready · still searching');
+ // An entry with no artist but a listed link is prepared from that link: it stays a ready source, not a title-only entry.
+ await page.evaluate(()=>window.__qaListedRow=true);await page.waitForFunction(()=>!document.querySelectorAll('.set-tracklist > li')[2].innerText.includes('MITCH DB'));
+ assert.equal(await text(page.locator('.set-sources-ready')),'1 source ready · still searching');
+ assert.doesNotMatch(await text(page.locator('.set-playlist-create small')),/without an artist/);
+ await page.evaluate(()=>window.__qaListedRow='restore');await page.waitForFunction(()=>document.querySelectorAll('.set-tracklist > li')[2].innerText.includes('MITCH DB'));
+ await wait();await page.screenshot({path:output+'/sources-and-recognize-compact-light.png'});
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+ // "Recognize audio too" replaces the old checkbox: it runs as the report's audio scan and streams what it hears.
  const scanStatus=page.locator('.set-scan-status'),pauseScan=page.getByRole('button',{name:'Pause scan',exact:true}),resumeScan=page.getByRole('button',{name:'Resume audio scan',exact:true});
+ await recognizeButton.click();await page.waitForFunction(()=>window.__qaRecognizeParams);
+ assert.deepEqual(await page.evaluate(()=>window.__qaRecognizeParams),{id:'set',youtube_browser:null});
+ await scanStatus.getByText('Recognizing audio · 2 confirmed, 1 added',{exact:true}).waitFor();assert.equal(await recognizeButton.count(),0);
+ assert.match(await scanStatus.innerText(),/3 audio samples checked[\s\S]*confirmed and new entries appear below\./);
+ const heardList=page.locator('.set-provisional');
+ assert.match(await text(heardList),/^Heard so far \(placed when the scan finishes\)\s+05:12\s+Kavinsky – Nightcall\s+06:41\s+M83 – Midnight City\s+Heard once$/);
+ assert.equal(await heardList.locator('button, a, input').count(),0);
+ let pauseBounds=await pauseScan.boundingBox(),playerBounds=await page.locator('.transport').boundingBox();if(!(pauseBounds.y+pauseBounds.height<=playerBounds.y))failures.push('Pause scan (recognition) is not fully above the player at 900x650: '+JSON.stringify({pauseBounds,playerBounds}));
+ await wait();await page.screenshot({path:output+'/recognize-running-compact-light.png'});
+ await pauseScan.click();await resumeScan.waitFor();
+ assert.match(await scanStatus.innerText(),/Audio scan paused[\s\S]*2 confirmed, 1 added so far/);
+ checks.sourceSearch='a published tracklist opens at once; rows show Waiting to search, Finding sources… (spinner), Source ready and Choose a version before a playlist exists; the header counts ready sources beside an unchanged Create playlist and find tracks';
+ checks.shazamWait='a scan Shazam asked to wait shows Waiting for Shazam with a countdown from progress.resume_at and keeps Pause scan; a stall backoff shows the engine\'s neutral Waiting before the next attempt, and its raw OSError warning reads as one sentence with the engine text under Details';
+ checks.recognize='Recognize audio too on a YouTube tracklist report sends sets.recognize {id, youtube_browser}, shows Recognizing audio with confirmed and added counts in the scan status, lists heard recordings without actions, and pauses';
+ // A finished scan opens as a report whose audio scan continues by itself and can be paused there.
+ await page.getByRole('button',{name:'New scan',exact:true}).click();assert.equal(await link.inputValue(),'');
+ await link.fill('https://www.youtube.com/watch?v=RvRhUHTV_8k');await page.evaluate(()=>{window.__qaFinishPublished=false;});
+ await scanButton.click();await page.evaluate(()=>window.__qaFinishScan=true);
  await scanStatus.getByText('Scanning audio',{exact:true}).waitFor();
  assert.match(await scanStatus.innerText(),/7 audio samples checked[\s\S]*Audio position 6:00 \/ 30:00 \xb7 2 recordings found[\s\S]*Uses public YouTube access \(pause to change\)\./);
+ // An unknown total animates the bar instead of claiming a value.
+ assert.equal(await scanStatus.getByRole('progressbar',{name:'Scan progress',exact:true}).getAttribute('value'),null);
+ assert.equal(await page.locator('.set-provisional li').count(),2);
  // DESIGN.md: the continuation's stop control stays visible above the player. Recorded instead of thrown so the checks after it still run.
  const cancelBounds=await pauseScan.boundingBox(),footerBounds=await page.locator('.transport').boundingBox();if(!(cancelBounds.y+cancelBounds.height<=footerBounds.y))failures.push('Pause scan is not fully above the player at 900x650: '+JSON.stringify({cancelBounds,footerBounds}));
  await wait();await page.screenshot({path:output+'/audio-continuation-light.png'});
  await pauseScan.click();await resumeScan.waitFor();
  assert.match(await scanStatus.innerText(),/Audio scan paused[\s\S]*Checked up to 05:00 of 30:00\.[\s\S]*7 audio samples saved \xb7 2 matches waiting to be placed/);
+ await wait();await page.screenshot({path:output+'/audio-paused-compact-light.png'});
  // A paused scan of a YouTube set resumes with the access chosen beside the Resume button.
  const resumeAccess=page.locator('.set-resume-access').getByLabel('YouTube access for this set',{exact:true});
  assert.equal(await resumeAccess.inputValue(),'');await resumeAccess.selectOption('firefox');
@@ -480,6 +554,18 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await resumeScan.click();await pauseScan.waitFor();
  assert.deepEqual(await page.evaluate(()=>window.__qaAutoScanParams),{id:'set',enabled:true,youtube_browser:'firefox'});
  assert.match(await scanStatus.innerText(),/Uses the Firefox session \(pause to change\)\./);
+ // While Shazam asks to wait, the scan says so and counts down to the time it gave.
+ await page.evaluate(()=>window.__qaShazamWait=true);await scanStatus.getByText('Waiting for Shazam',{exact:true}).waitFor();
+ assert.match(await text(scanStatus.locator('.scan-progress-countdown')),/^Continues automatically in 1:3\d$/);
+ assert.equal(await scanStatus.locator('.scan-progress').getAttribute('data-state'),'waiting');assert.equal(await pauseScan.isVisible(),true);
+ await pauseScan.click();await resumeScan.waitFor();
+ await resumeScan.click();await pauseScan.waitFor();
+ await page.evaluate(()=>window.__qaStallWait=true);await scanStatus.getByText('Waiting before the next attempt',{exact:true}).waitFor();
+ assert.equal(await scanStatus.getByText('Waiting for Shazam',{exact:true}).count(),0);
+ assert.match(await text(scanStatus.locator('.scan-progress-countdown')),/^Continues automatically in 1:3\d$/);
+ assert.match(await scanStatus.innerText(),/Last attempt: The scan stopped because of an internal error\. Try again\./);
+ assert.equal(await text(scanStatus.locator('.set-error-text')),'The scan stopped because of an internal error. Try again.');
+ assert.match(await scanStatus.locator('.set-error-details code').textContent(),/^\[Errno 28\] No space left on device/);assert.equal(await scanStatus.locator('.set-error-details .disclosure-toggle').getAttribute('aria-expanded'),'false');
  await pauseScan.click();await resumeScan.waitFor();
  assert.equal(await resumeAccess.inputValue(),'firefox');assert.match(await resumeAccess.locator('option:checked').innerText(),/\(saved with this set\)/);
  // A scan that finishes while another view is open must not take the view away.
@@ -494,15 +580,15 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await link.fill('https://www.youtube.com/watch?v=LTFCuhofnN8');
  await page.evaluate(()=>{window.__qaScanError='YouTube requires age-verified access to this mix. Choose your signed-in browser under YouTube access, then retry.';window.__qaFinishScan=false;});
  await scanButton.click();
- // An access failure is shown inside the YouTube access block under the link field, not as a general form error.
+ // (b) An access failure opens the YouTube access block by itself, under the link field, with the alert inside.
  const accessAlert=page.locator('.set-access').getByRole('alert');
  await accessAlert.filter({hasText:'YouTube requires age-verified access'}).waitFor();
  assert.equal(await page.getByRole('alert').filter({hasText:'YouTube requires age-verified access'}).count(),1);
- assert.equal(await page.locator('.set-access').getAttribute('data-error'),'true');
+ assert.equal(await page.locator('.set-access').getAttribute('data-error'),'true');assert.equal(await accessToggle.getAttribute('aria-expanded'),'true');
  const linkBounds=await link.boundingBox(),accessBounds=await page.locator('.set-access').boundingBox();assert.ok(accessBounds.y>=linkBounds.y+linkBounds.height && accessBounds.y+accessBounds.height<=900,JSON.stringify({linkBounds,accessBounds}));
  assert.equal(await link.inputValue(),'https://www.youtube.com/watch?v=LTFCuhofnN8');
  assert.equal(await access.inputValue(),'');assert.equal(await page.evaluate(()=>window.__qaLastScanParams.youtube_browser),null);
- await access.selectOption('chrome');assert.equal(await accessAlert.count(),0);
+ await access.selectOption('chrome');assert.equal(await accessAlert.count(),0);assert.equal(await text(accessToggle),'Access: Chrome');
  assert.equal(await page.evaluate(()=>localStorage.getItem('setImport.youtubeAccess')),'chrome');
  await page.evaluate(()=>window.__qaScanError=null);
  await scanButton.click();
@@ -521,16 +607,37 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  // The choice is remembered across a restart and is only sent with YouTube links.
  await page.reload();await page.getByRole('button',{name:'Import DJ Set',exact:true}).click();
  assert.equal(await page.locator('.set-access').count(),0);
- await link.fill('https://youtu.be/LTFCuhofnN8');assert.equal(await access.inputValue(),'safari');
+ await link.fill('https://youtu.be/LTFCuhofnN8');assert.equal(await text(accessToggle),'Access: Safari');assert.equal(await access.count(),0);
+ await accessToggle.click();assert.equal(await access.inputValue(),'safari');
  await scanButton.click();await page.getByRole('button',{name:'Cancel scan',exact:true}).waitFor();
  assert.equal(await page.evaluate(()=>window.__qaLastScanParams.youtube_browser),'safari');
  await page.getByRole('button',{name:'Cancel scan',exact:true}).click();await cancelled();
- await link.fill('https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n');assert.equal(await page.locator('.set-access').count(),0);
+ await link.fill('https://open.spotify.com/playlist/37i9dQZF1DX4dyzvuaRJ0n');assert.equal(await page.locator('.set-access').count(),0);assert.equal(await accessToggle.count(),0);
  await scanButton.click();await page.getByRole('button',{name:'Cancel scan',exact:true}).waitFor();
  assert.equal(await page.evaluate(()=>window.__qaLastScanParams.youtube_browser),null);
  await page.getByRole('button',{name:'Cancel scan',exact:true}).click();await cancelled();
- checks.youtubeAccess='access block only for YouTube links, public is the default, an access error from the scan task or from sets.scan itself appears inside the block, the chosen browser is sent with the next scan, survives a reload and is not sent with other links; a paused YouTube set resumes with the access chosen there';
- checks.setScanning='scan-from modes keep their input, tracklist/audio progress centered on desktop and compact layouts, initial scan cancellation, input preservation, honest unknown totals, automatic continuation pause, saved samples and Resume, a scan finishing elsewhere keeps the current view';
+ // (c) Engine failures read as a sentence; the raw text is only under Details.
+ const rawError='Error -3 while decompressing data: incorrect header check',restartSentence='CrateLoom was updated while it was open. Restart CrateLoom to continue.';
+ await page.evaluate(raw=>window.__qaScanError=raw,rawError);await scanButton.click();
+ const restart=page.getByRole('alert').filter({hasText:restartSentence});await restart.waitFor();
+ assert.equal(await text(restart.locator('.set-error-text')),restartSentence);
+ const rawPlaces=()=>page.evaluate(raw=>[...document.querySelectorAll('.set-workspace *')].filter(el=>[...el.childNodes].some(node=>node.nodeType===3 && node.textContent.includes(raw))).map(el=>!!el.closest('.set-error-details .disclosure-content')),rawError);
+ assert.deepEqual(await rawPlaces(),[true]);
+ const details=restart.getByRole('button',{name:'Details',exact:true});assert.equal(await details.getAttribute('aria-expanded'),'false');
+ await details.click();await restart.getByText(rawError,{exact:true}).waitFor({state:'visible'});
+ await wait();await page.screenshot({path:output+'/scan-error-details-dark.png'});
+ await restart.getByRole('button',{name:'Dismiss message',exact:true}).click();
+ // A newer engine sends its own sentence with error_detail; the detail is offered the same way.
+ await page.evaluate(()=>window.__qaScanError={error:'A file or network operation failed. Try again.',error_detail:'OSError: [Errno 5] Input/output error'});await scanButton.click();
+ const plainAlert=page.getByRole('alert').filter({hasText:'A file or network operation failed. Try again.'});await plainAlert.waitFor();
+ const plainDetails=plainAlert.getByRole('button',{name:'Details',exact:true});await plainDetails.click();assert.equal(await plainDetails.getAttribute('aria-expanded'),'true');
+ await plainAlert.locator('code').waitFor({state:'visible'});assert.equal(await plainAlert.locator('code').textContent(),'OSError: [Errno 5] Input/output error');
+ await page.evaluate(()=>window.__qaScanError=null);await plainAlert.getByRole('button',{name:'Dismiss message',exact:true}).click();
+ checks.scanErrors='raw engine text (zlib) shows the restart sentence with the original only under Details; an engine sentence with error_detail shows that detail under Details';
+ checks.trackingParams='si and other share parameters are removed from a filled link and from the scan request';
+ checks.tokensOnDemand='no token fields or Advanced disclosure on the form; a Spotify authorization error reveals the Spotify token field beside it';
+ checks.youtubeAccess='access toggle (Access: Public) only for YouTube links, at the end of the link row, reveals the access block and guide; public is the default; an access error from the scan task or from sets.scan itself opens the block by itself with the alert inside; the chosen browser is sent with the next scan, survives a reload, is named on the toggle and is not sent with other links; a paused YouTube set resumes with the access chosen there';
+ checks.setScanning='one helper line, scan-from modes keep their input, links are sent with fingerprint:false, tracklist progress centered on desktop and compact layouts, initial scan cancellation, input preservation, honest unknown totals in the report scan status, streamed hits, automatic continuation pause, saved samples and Resume, a scan finishing elsewhere keeps the current view';
 
  // Deleting a playlist and removing a track both ask first; Cancel and Escape change nothing.
  const dialog=page.getByRole('alertdialog'),status=text=>page.getByRole('status').filter({hasText:text}).waitFor();

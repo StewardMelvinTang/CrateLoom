@@ -83,13 +83,13 @@ def read_comments(api,watch):
         return []
     set_scan_jobs.progress('Checking published comment tracklists')
     try:
-        response = api.import_process([
-            binary,'--ignore-config','--no-plugin-dirs','--no-remote-components','--proxy','',
+        response = youtube_audio.run_helper(api,binary,[
+            '--ignore-config','--no-plugin-dirs','--no-remote-components','--proxy','',
             '--no-playlist','--no-warnings','--skip-download','--ignore-no-formats-error',
             '--socket-timeout','6','--retries','0','--extractor-retries','0',
             '--get-comments','--extractor-args','youtube:comment_sort=top;max_comments=30,30,0,0;skip=hls,dash;player_skip=js',
             *youtube_audio.runtime_args(),'--print','%(.{id,comments})j','--',watch,
-        ],22,process_group=True)
+        ],22)
         data = json.loads(response.stdout)
         expected = parse_qs(urlsplit(watch).query)['v'][0]
         if data.get('id') != expected:

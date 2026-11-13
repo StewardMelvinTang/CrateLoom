@@ -1,4 +1,5 @@
 """Recording references and explicit direct-audio source resolution."""
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import re
@@ -19,10 +20,67 @@ MAX_CANDIDATES = 250
 # queues them, so recent entries are only dropped at a limit sized for a full set.
 CANDIDATE_HOLD = 900
 CANDIDATE_LIMIT = MAX_CANDIDATES + 20 * playlist_sources.MAX_ENTRIES
-# MusicBrainz allows one request per second; the lock paces every caller in turn.
+# MusicBrainz allows one request per second; the lock paces every caller in the
+# engine in turn, including the metadata catalog search.
 MUSICBRAINZ_LOCK = threading.Lock()
 MUSICBRAINZ_INTERVAL = 1.1
 LAST_MUSICBRAINZ_REQUEST = 0
+# Background work (set source discovery) yields to callers the owner is waiting for.
+MUSICBRAINZ_QUEUE = threading.Condition()
+MUSICBRAINZ_FOREGROUND = 0
+PRIORITY = threading.local()
+
+
+@contextmanager
+def background_requests():
+    previous = getattr(PRIORITY, 'background', False)
+    PRIORITY.background = True
+    try:
+        yield
+    finally:
+        PRIORITY.background = previous
+
+
+@contextmanager
+def musicbrainz_turn():
+    """Hold the single MusicBrainz slot; background callers wait while a foreground caller is queued."""
+    global MUSICBRAINZ_FOREGROUND
+    from .set_scan_jobs import check
+    background = getattr(PRIORITY, 'background', False)
+    with MUSICBRAINZ_QUEUE:
+        if background:
+            while MUSICBRAINZ_FOREGROUND:
+                check()
+                MUSICBRAINZ_QUEUE.wait(.5)
+        else:
+            MUSICBRAINZ_FOREGROUND += 1
+    try:
+        while not MUSICBRAINZ_LOCK.acquire(timeout=.5):
+            check()
+            if background and MUSICBRAINZ_FOREGROUND:
+                # A foreground caller arrived while this one waited: let it go first.
+                with MUSICBRAINZ_QUEUE:
+                    while MUSICBRAINZ_FOREGROUND:
+                        check()
+                        MUSICBRAINZ_QUEUE.wait(.5)
+    finally:
+        if not background:
+            with MUSICBRAINZ_QUEUE:
+                MUSICBRAINZ_FOREGROUND -= 1
+                MUSICBRAINZ_QUEUE.notify_all()
+    try:
+        yield
+    finally:
+        MUSICBRAINZ_LOCK.release()
+
+
+def pace_musicbrainz(interval=None):
+    """Wait out the shared interval; call while holding ``musicbrainz_turn``."""
+    global LAST_MUSICBRAINZ_REQUEST
+    delay = (MUSICBRAINZ_INTERVAL if interval is None else interval)-(time.monotonic()-LAST_MUSICBRAINZ_REQUEST)
+    if delay > 0:
+        time.sleep(delay)
+    LAST_MUSICBRAINZ_REQUEST = time.monotonic()
 
 
 def capabilities(api):
@@ -65,14 +123,10 @@ def get(api, cid, kind):
 
 
 def musicbrainz(path, params):
-    global LAST_MUSICBRAINZ_REQUEST
-    with MUSICBRAINZ_LOCK:
+    with musicbrainz_turn():
         url = 'https://musicbrainz.org/ws/2/' + path + '?' + urllib.parse.urlencode(params)
         for attempt in range(2):
-            delay = MUSICBRAINZ_INTERVAL-(time.monotonic()-LAST_MUSICBRAINZ_REQUEST)
-            if delay > 0:
-                time.sleep(delay)
-            LAST_MUSICBRAINZ_REQUEST = time.monotonic()
+            pace_musicbrainz()
             try:
                 return json.loads(preparation.request(url))
             except urllib.error.HTTPError as error:

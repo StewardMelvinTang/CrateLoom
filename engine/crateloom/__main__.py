@@ -19,6 +19,7 @@ import uuid
 from .analysis_worker import VERSION as ANALYSIS_VERSION
 from .structure_worker import MAX_DURATION as MAX_STRUCTURE_DURATION, MAX_SECTIONS, VERSION as STRUCTURE_VERSION
 from .fast_sections import VERSION as FAST_STRUCTURE_VERSION
+from .errors import public_error
 
 VERSION = '0.1.0'
 ROOT = Path(os.environ.get('CRATELOOM_DATA', Path.home() / '.crateloom'))
@@ -412,6 +413,9 @@ def dispatch(method, p):
             AUTO_STOP.set()
             AUTO_WAKE.set()
             from .set_scan_jobs import shutdown as stop_set_scans
+            try: from .set_discovery import stop_all as stop_discovery
+            except ImportError: stop_discovery=lambda: None
+            stop_discovery()
             stop_set_scans()
             stop_shazam(sys.modules[__name__])
             stop_acquisitions();shutdown(); return {'stopping':True}
@@ -666,7 +670,8 @@ def main():
             if req.get('protocol_version')!=1 or not isinstance(req.get('params'),dict) or not isinstance(req.get('request_id'),str): raise ValueError('Invalid protocol request')
             out={'protocol_version':1,'request_id':req['request_id'],'result':dispatch(req['method'],req['params'])}
         except Exception as e:
-            out={'protocol_version':1,'request_id':req.get('request_id'),'error':{'code':'engine_error','message':str(e)}}
+            message,code,detail=public_error(e)
+            out={'protocol_version':1,'request_id':req.get('request_id'),'error':{'code':code,'message':message,**({'detail':detail} if detail else {})}}
         # A reply that cannot be written must not end the request loop.
         try: text=json.dumps(out,ensure_ascii=False); text.encode(sys.stdout.encoding or 'utf-8')
         except UnicodeError: text=json.dumps(out)

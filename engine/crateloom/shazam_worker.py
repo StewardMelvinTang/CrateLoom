@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import traceback
 import wave
 
 RATE = 16000
@@ -15,6 +16,32 @@ MIN_TAIL = 6
 MAX_DURATION = 3 * 60 * 60
 REQUEST_INTERVAL = 2
 RATE_LIMIT_COOLDOWN = 90
+
+
+TLS_ERRORS = {'ClientConnectorCertificateError','ClientSSLError','SSLError','SSLCertVerificationError',
+              'CertificateError','ServerFingerprintMismatch'}
+BAD_REPLY_ERRORS = {'ClientPayloadError','ContentEncodingError','FailedDecodeJson','JSONDecodeError',
+                    'ContentTypeError','BadResponseStatus','TransferEncodingError'}
+UNREACHABLE_ERRORS = {'ClientConnectionError','ClientConnectorError','ClientOSError','ServerDisconnectedError',
+                      'ServerConnectionError','ServerTimeoutError','TimeoutError','ConnectionError','gaierror'}
+
+
+def classify(error):
+    """Name a request failure by class, without importing the optional HTTP stack."""
+    names = {cls.__name__ for cls in type(error).__mro__}
+    if 'RateLimited' in names:
+        return 'rate_limited'
+    if names & TLS_ERRORS:
+        return 'tls'
+    if names & BAD_REPLY_ERRORS:
+        return 'bad_reply'
+    if names & UNREACHABLE_ERRORS or isinstance(error, OSError):
+        return 'unreachable'
+    return 'internal'
+
+
+def failure_detail(error):
+    return f'{type(error).__name__}: {error}'[:500]
 
 
 def report_progress(progress, partial):
@@ -94,7 +121,8 @@ async def scan(source, duration, offset=0, batch_seconds=MAX_DURATION):
                         message = ('Shazam is rate limiting requests. Try again later.' if isinstance(error, RateLimited)
                                    else 'ShazamIO could not reach Shazam or read its response. Try again later.')
                         return {'hits':hits,'scanned_until':start,'warning':message,
-                                'cooldown':RATE_LIMIT_COOLDOWN if isinstance(error, RateLimited) else 0}
+                                'cooldown':RATE_LIMIT_COOLDOWN if isinstance(error, RateLimited) else 0,
+                                'failure':{'code':classify(error),'detail':failure_detail(error)}}
                     if not isinstance(result, dict):
                         raise ValueError('ShazamIO returned an invalid response.')
                     add_match(hits, start, length, result)
@@ -114,19 +142,37 @@ async def scan(source, duration, offset=0, batch_seconds=MAX_DURATION):
     return {'hits':hits}
 
 
+def fail(code, error, message=None):
+    """Report a stopped worker as data; the engine maps the code to a sentence."""
+    failure = {'code':code,'detail':failure_detail(error)}
+    if message:
+        failure['message'] = message
+    print(json.dumps({'failure':failure}))
+    raise SystemExit(1)
+
+
 if __name__ == '__main__':
     try:
         offset = float(sys.argv[3]) if len(sys.argv) > 3 else 0
         batch_seconds = int(sys.argv[4]) if len(sys.argv) > 4 else MAX_DURATION
         if len(sys.argv) > 5 and sys.argv[5] == 'fast':
             from .shazam_fast import scan as scan_fast
-            result = scan_fast(Path(sys.argv[1]),float(sys.argv[2]),offset,json.load(sys.stdin))
+            result = scan_fast(Path(sys.argv[1]),float(sys.argv[2]),offset,json.load(sys.stdin),batch_seconds)
         else:
             result = scan(Path(sys.argv[1]),float(sys.argv[2]),offset,batch_seconds)
         print(json.dumps(asyncio.run(result)))
-    except (ValueError, OSError, ImportError) as error:
+    except ValueError as error:
         print(str(error), file=sys.stderr)
-        raise SystemExit(1)
-    except subprocess.SubprocessError:
+        fail('decode', error, str(error))
+    except ImportError as error:
+        print(str(error), file=sys.stderr)
+        fail('runtime', error)
+    except OSError as error:
+        print(str(error), file=sys.stderr)
+        fail('io', error)
+    except subprocess.SubprocessError as error:
         print('FFmpeg could not decode the mix audio.', file=sys.stderr)
-        raise SystemExit(1)
+        fail('decode', error, 'FFmpeg could not decode the mix audio.')
+    except Exception as error:
+        traceback.print_exc()
+        fail('internal', error)

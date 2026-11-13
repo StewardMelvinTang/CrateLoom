@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from crateloom import __main__ as api
-from crateloom import download_http, playlist_sources, preparation, scan_audio, set_import, set_scan_jobs, shazam_fast, shazam_scan, shazam_worker, youtube_audio, youtube_tracklist
+from crateloom import download_http, playlist_sources, preparation, scan_audio, set_discovery, set_import, set_scan_jobs, shazam_fast, shazam_scan, shazam_worker, youtube_audio, youtube_tracklist
 from crateloom.library_imports import ImportCancelled
 
 WATCH = 'https://www.youtube.com/watch?v=RvRhUHTV_8k'
@@ -28,6 +28,8 @@ class ScanJobs(unittest.TestCase):
         for name, value in [('ROOT',self.root),('DB',self.root/'library.sqlite3'),('CACHE',self.root/'cache')]:
             self.stack.enter_context(patch.object(api,name,value))
         self.stack.enter_context(patch.object(shazam_scan,'NEXT_SCAN_AT',0))
+        # Source discovery searches the network; test_set_discovery covers it with fakes.
+        self.stack.enter_context(patch.object(set_discovery,'schedule',return_value=0))
 
     def finish(self, task):
         deadline = time.monotonic()+8
@@ -70,14 +72,23 @@ class ScanJobs(unittest.TestCase):
         def recognize(*args,**kwargs):
             entered.set();release.wait(5);set_scan_jobs.check()
         info = {'title':'Mix','duration':120,'description':'0:00 Artist - First\n1:00 Artist - Second'}
-        with patch.object(set_import,'video_info',return_value=info),patch.object(shazam_scan,'scan',side_effect=recognize):
-            task = api.dispatch('sets.scan',{'url':WATCH,'fingerprint':True})
+        with patch.object(set_import,'video_info',return_value=info),patch.object(shazam_scan,'interpreter',return_value=sys.executable), \
+             patch.object(shazam_scan,'scan',side_effect=recognize) as audio:
+            # An older client asking for audio too gets its list at once; recognition continues afterwards.
+            published = self.finish(api.dispatch('sets.scan',{'url':WATCH,'fingerprint':True}))
+            audio.assert_not_called()
+            self.assertEqual(published['state'],'completed')
+            self.assertEqual(published['result']['recognition']['state'],'running')
+            sid = published['result']['id']
+            task = api.dispatch('sets.resume_scan',{'id':sid})
             try:
                 self.assertTrue(entered.wait(2));api.dispatch('sets.cancel_task',{'task_id':task['id']})
             finally:release.set()
             finished = self.finish(task)
         self.assertEqual(finished['state'],'cancelled')
-        self.assertEqual([row['title'] for row in finished['result']['tracks']],['First','Second'])
+        report = api.dispatch('sets.get',{'id':sid})
+        self.assertEqual([row['title'] for row in report['tracks']],['First','Second'])
+        self.assertEqual((report['scan']['automatic'],report['recognition']['state']),(False,'paused'))
         self.assertEqual(len(api.dispatch('sets.list',{})),1)
 
     def test_cancel_terminates_real_recognition_process_and_keeps_checkpoint(self):
@@ -92,7 +103,9 @@ time.sleep(60)
 ''')
         executable.chmod(0o755)
         with patch.object(shazam_scan,'interpreter',return_value=str(executable)):
-            task = api.dispatch('sets.scan',{'path':str(source),'fingerprint':True})
+            saved = self.finish(api.dispatch('sets.scan',{'path':str(source),'fingerprint':True}))
+            self.assertEqual((saved['state'],saved['result']['scan']['offset'],saved['result']['tracks']),('completed',0,[]))
+            task = api.dispatch('sets.resume_scan',{'id':saved['result']['id']})
             try:
                 deadline=time.monotonic()+3
                 while time.monotonic()<deadline:
@@ -211,32 +224,49 @@ time.sleep(60)
         self.assertEqual([row['title'] for row in result['result']['tracks']],['First','Second','Third'])
         self.assertEqual(result['result']['tracks'][0]['evidence'],['Published comment tracklist'])
 
+    def continue_scan(self, sid):
+        with api.connect() as db:
+            db.execute('UPDATE dj_set_scan SET retry_at=0 WHERE set_id=?',(sid,))
+        self.assertTrue(set_import.auto_scan_step(api))
+        return api.dispatch('sets.get',{'id':sid})
+
     def test_named_chapters_survive_when_audio_cannot_be_obtained(self):
         page={'title':'Mix','duration':180,'chapters':[{'start_time':0,'title':'First song'},{'start_time':90,'title':'Second song'}]}
-        with patch.object(set_import,'video_info',return_value=page),patch.object(shazam_scan,'scan',side_effect=ValueError('Audio unavailable')):
+        with patch.object(set_import,'video_info',return_value=page),patch.object(shazam_scan,'interpreter',return_value=sys.executable):
             result=self.finish(api.dispatch('sets.scan',{'url':WATCH}))
         self.assertEqual(result['state'],'completed')
         self.assertEqual([row['title'] for row in result['result']['tracks']],['First song','Second song'])
-        self.assertIn('Audio unavailable',result['result']['warning'])
+        with patch.object(shazam_scan,'scan',side_effect=ValueError('Audio unavailable')):
+            report=self.continue_scan(result['result']['id'])
+        self.assertEqual([row['title'] for row in report['tracks']],['First song','Second song'])
+        self.assertIn('Audio unavailable',report['recognition']['warning'])
+        self.assertIsNone(report['warning'])
 
     def test_successful_audio_with_no_recognition_is_not_reported_as_fetch_failure(self):
         page={'title':'Mix','duration':180,'description':''}
-        with patch.object(set_import,'video_info',return_value=page),patch.object(shazam_scan,'scan',return_value={'duration':180,'hits':[]}):
+        with patch.object(set_import,'video_info',return_value=page),patch.object(shazam_scan,'interpreter',return_value=sys.executable), \
+             patch.object(shazam_scan,'video_audio',return_value=self.audio()),patch.object(api,'probe',return_value=(180,None,None)):
             result=self.finish(api.dispatch('sets.scan',{'url':WATCH}))
         self.assertEqual(result['state'],'completed')
-        self.assertTrue(result['result']['tracks'][0]['unknown'])
-        self.assertIsNone(result['result']['scan']['offset'])
-        self.assertIn('audio was scanned successfully',result['result']['warning'])
+        with patch.object(shazam_scan,'scan',return_value={'duration':180,'hits':[]}):
+            report=self.continue_scan(result['result']['id'])
+        self.assertTrue(report['tracks'][0]['unknown'])
+        self.assertIsNone(report['scan']['offset'])
+        self.assertIn('audio was scanned successfully',report['warning'])
 
     def test_recognition_keeps_named_chapters_that_have_no_artist_credit(self):
         page={'title':'Mix','duration':180,'chapters':[{'start_time':0,'title':'First song'},{'start_time':90,'title':'Second song'}]}
         audio={'duration':180,'hits':[{'start':0,'end':30,'key':'123','artist':'Artist','title':'Different fingerprint','samples':1}]}
-        with patch.object(set_import,'video_info',return_value=page),patch.object(shazam_scan,'scan',return_value=audio) as recognize:
+        with patch.object(set_import,'video_info',return_value=page),patch.object(shazam_scan,'interpreter',return_value=sys.executable), \
+             patch.object(shazam_scan,'scan',return_value=audio) as recognize:
             result=self.finish(api.dispatch('sets.scan',{'url':WATCH}))
+            recognize.assert_not_called()
+            report=self.continue_scan(result['result']['id'])
         self.assertEqual(result['state'],'completed')
-        titles=[row['title'] for row in result['result']['tracks']]
-        self.assertIn('First song',titles);self.assertIn('Second song',titles)
-        self.assertEqual(recognize.call_args.kwargs,{'batch':False})
+        titles=[row['title'] for row in report['tracks']]
+        self.assertEqual(titles,['First song','Second song'])
+        self.assertEqual(report['tracks'][0]['recognized_other'],[{'at':0,'title':'Different fingerprint','artist':'Artist'}])
+        self.assertNotIn('batch',recognize.call_args.kwargs)
 
     def test_extractor_tracklist_identity_must_match_requested_video(self):
         response=SimpleNamespace(stdout=json.dumps({'id':'HHloSWHKdvw','description':'0:00 Artist - Wrong'}))

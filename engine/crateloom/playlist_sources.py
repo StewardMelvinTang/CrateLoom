@@ -107,12 +107,12 @@ def extractor(api, provider, url):
     if not binary:
         raise ValueError('Install yt-dlp to read this playlist.')
     try:
-        result = api.import_process([
-            binary, '--ignore-config', '--no-plugin-dirs', '--no-remote-components',
+        result = youtube_audio.run_helper(api, binary, [
+            '--ignore-config', '--no-plugin-dirs', '--no-remote-components',
             '--proxy', '', '--flat-playlist', '--skip-download', '--yes-playlist',
             '--socket-timeout', '10', '--retries', '1', '--playlist-end', str(MAX_ENTRIES + 1),
             '--dump-single-json', '--', url,
-        ], 90, process_group=True)
+        ], 90)
         data = json.loads(result.stdout)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise ValueError(f'{provider} could not read this playlist. Check that the link is public.') from error

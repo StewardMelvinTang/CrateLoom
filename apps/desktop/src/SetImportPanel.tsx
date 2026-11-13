@@ -1,7 +1,7 @@
 import {useEffect, useRef, useState, type ReactNode} from 'react';
 import {invoke, convertFileSrc} from '@tauri-apps/api/core';
 import {open} from '@tauri-apps/plugin-dialog';
-import {AlertTriangle, ArrowUpRight, Check, ChevronDown, ChevronUp, Download, FolderOpen, GripVertical, History, Info, ListMusic, LoaderCircle, Music2, Pause, Play, Plus, RotateCcw, Search, Trash2, X} from 'lucide-react';
+import {AlertTriangle, ArrowUpRight, AudioLines, Check, ChevronDown, ChevronUp, Download, FolderOpen, GripVertical, History, Info, ListMusic, LoaderCircle, Music2, Pause, Play, Plus, RotateCcw, Search, Trash2, X} from 'lucide-react';
 import {call, message} from './engine';
 import {DownloadError, DownloadProgress, downloadStateLabel, isActiveDownload, isRetryableDownload} from './Downloads';
 import {Disclosure} from './Disclosure';
@@ -19,12 +19,23 @@ type SetTrack = {
   links?: SourceLink[]; track_id: string|null; playback_track_id: string|null; download_id: string|null; download_state: string|null;
   source_options?: SourceOption[];
   needs_review?: boolean; unknown?: boolean; version_warning?: string; error: string|null;
+  /** Where the background source search for this entry stands; null when none was started. */
+  source_search?: SourceSearch|null;
+  /** The tracklist listed a link for this entry: "Create playlist" uses it even without an artist. */
+  listed_link?: boolean;
+  recognized?: {at: number; played: number|null}; recognized_other?: {at: number; title: string; artist: string}[];
 };
+type SourceSearch = 'queued'|'searching'|'ready'|'choose'|'none'|'failed';
 type ReportScan = {offset: number|null; duration: number|null; retry_at: number; automatic: boolean; running: boolean; stalled: boolean; fast: boolean; samples: number; cancelling?: boolean; progress?: ScanProgressData; pending_matches?: number};
+type Recognition = {state: 'none'|'running'|'paused'|'complete'|'failed'; confirmed: number; added: number; warning: string|null};
+type Heard = {at: number; end: number; title: string; artist: string; samples: number};
 type Report = {id: string; name: string; watch: string|null; playlist_id: string|null; warning: string|null; tracks: SetTrack[]; scan?: ReportScan;
   /** The browser session saved with this set; its audio scan resumes with it. Null means public access. */
-  youtube_browser?: string|null};
-type Task = {id: string; state: 'running'|'cancelling'|'cancelled'|'completed'|'failed'; result: Report|null; error: string|null; cancellable?: boolean; progress?: ScanProgressData};
+  youtube_browser?: string|null;
+  discovery?: {pending: number; running: number}; recognition?: Recognition;
+  /** Recordings the running audio scan has heard; they become entries when the scan finishes. */
+  provisional?: Heard[]};
+type Task = {id: string; state: 'running'|'cancelling'|'cancelled'|'completed'|'failed'; result: Report|null; error: string|null; error_code?: string; error_detail?: string|null; cancellable?: boolean; progress?: ScanProgressData};
 type SavedSet = {id: string; name: string; playlist_id?: string|null; entries: number; imported: number; with_download: number;
   offset: number|null; duration: number|null; automatic: number; created_at: number|null};
 type RowTask = {entry_id: string; report_id: string; task_id: string};
@@ -55,6 +66,25 @@ const savedYoutubeAccess = () => {
   catch { return ''; }
 };
 const isYoutubeUrl = (text: string) => /^(?:https?:\/\/)?(?:[\w-]+\.)?(?:youtube\.com|youtu\.be)\//i.test(text.trim());
+/** One YouTube video, as opposed to a playlist: the only kind of set whose audio can be recognized after the fact. */
+const isYoutubeVideo = (text: string) => isYoutubeUrl(text) && !/[?&]list=|\/playlist\b/i.test(text);
+// The same share and tracking parameters the engine drops; v and list are kept.
+const TRACKING_PARAMS = /^(?:si|pp|feature|ref|fbclid|igsh|igshid|t|utm_.*)$/i;
+/** A pasted link without its share and tracking parameters. Anything that is not a URL is returned as typed. */
+const stripTracking = (text: string) => {
+  const trimmed = text.trim();
+  if (!/^(?:https?:\/\/)?[\w-]+(?:\.[\w-]+)+\/\S*\?/i.test(trimmed)) return text;
+  const scheme = /^https?:\/\//i.test(trimmed);
+  try {
+    const parsed = new URL(scheme ? trimmed : `https://${trimmed}`);
+    const names: string[] = [];
+    parsed.searchParams.forEach((_, name) => { if (TRACKING_PARAMS.test(name) && !names.includes(name)) names.push(name); });
+    if (!names.length) return text;
+    names.forEach(name => parsed.searchParams.delete(name));
+    const clean = parsed.toString();
+    return scheme ? clean : clean.replace(/^https:\/\//, '');
+  } catch { return text; }
+};
 // Every access failure the engine reports names YouTube access, a session, or age verification.
 // Keep this list explicit so a reworded sentence elsewhere cannot be mistaken for an access problem.
 const ACCESS_ERROR_PHRASES = ['youtube access', 'youtube session', 'age verif', 'signed-in session',
@@ -69,12 +99,51 @@ const APPROXIMATE_NOTE = /Shazam timestamps are approximate\. Check track versio
 const APPROXIMATE_MARK = 'Shazam timestamps are approximate.';
 const SPOTIFY_PUBLIC_NOTE = 'Spotify supplied its public track list. Use Spotify authorization for guaranteed pagination.';
 /** The part of a saved scan warning that still tells the user something the rest of the report does not. */
+const cleanNote = (warning: string|null) => (warning || '').replace(APPROXIMATE_NOTE, '').replace(/^Partial scan\.\s*/, '').trim();
 const scanNote = (warning: string|null) => {
-  const text = (warning || '').replace(APPROXIMATE_NOTE, '').replace(/^Partial scan\.\s*/, '').trim();
+  const text = cleanNote(warning);
   return text === SPOTIFY_PUBLIC_NOTE
-    ? 'Spotify’s public page was read, which can cut a long playlist short. If entries are missing, add a Spotify token under New scan > Advanced and scan the link again.'
+    ? 'Spotify’s public page was read, which can cut a long playlist short. If entries are missing, connect Spotify and scan the link again.'
     : text;
 };
+
+// --- Plain errors ---------------------------------------------------------------
+// Engine and network text the user cannot act on is replaced by a sentence; the original stays under Details.
+const RESTART_SENTENCE = 'CrateLoom was updated while it was open. Restart CrateLoom to continue.';
+const PLAIN_ERRORS: [RegExp, string][] = [
+  [/decompressing data|incorrect header check|^ModuleNotFoundError|^ImportError/, RESTART_SENTENCE],
+  [/valid HTTPS download URL|public HTTPS URL on port 443|private or unsupported address/, 'Paste the mix’s https:// link.'],
+  [/single YouTube video or song link|public track link from the service['’]s Share menu/, 'Paste a single mix link from YouTube, or a playlist link.'],
+  [/urlopen error|Name or service not known|nodename nor servname/, 'Couldn’t open this link. Check your connection.'],
+  [/^The published tracklist is unavailable/, 'The tracklist couldn’t be read.'],
+  [/^Install the ShazamIO scanner/, 'Audio recognition isn’t installed.'],
+  [/^\[Errno 2\]/, 'The audio file can’t be found.'],
+  [/ShazamIO stopped unexpectedly|^\w+(\.\w+)*(Error|Exception): /, 'Audio recognition stopped unexpectedly. Try again.'],
+  [/A Shazam scan is already running/, 'Another audio scan is running; this one will start after it.'],
+  [/database is locked/, 'CrateLoom was busy. Try again.'],
+];
+// Sentences the engine already words for the user; they are shown as they are.
+const KEPT_ERRORS = /Spotify|SoundCloud|playlist|Live mixes|request queue is full|No published entries|more than 150|Scan stopped when CrateLoom closed/;
+type PlainError = {text: string; detail: string|null};
+function plainError(raw: string, detail?: string|null): PlainError {
+  const text = raw.trim();
+  const extra = detail && detail.trim() !== text ? detail.trim() : null;
+  if (!text) return {text: '', detail: extra};
+  if (!isYoutubeAccessError(text)) {
+    const mapped = PLAIN_ERRORS.find(([pattern]) => pattern.test(text));
+    if (mapped) return {text: mapped[1], detail: extra || (mapped[1] === text ? null : text)};
+    if (!KEPT_ERRORS.test(text) && /Traceback|Errno|Error -\d/.test(text)) return {text: 'The scan stopped because of an internal error. Try again.', detail: extra || text};
+  }
+  return {text, detail: extra};
+}
+/** A plain error sentence, with the engine's own wording available on demand. */
+function ErrorText({raw, detail}: {raw: string; detail?: string|null}) {
+  const error = plainError(raw, detail);
+  return <>
+    <span className="set-error-text">{error.text}</span>
+    {error.detail && <Disclosure className="set-error-details" label="Details"><code>{error.detail}</code></Disclosure>}
+  </>;
+}
 const NOT_SCANNED_LEAD = 'The mix audio was not scanned.';
 const sourceName = (watch: string) => {
   try {
@@ -105,7 +174,7 @@ function usePolling(active: boolean, delay: number, poll: (alive: () => boolean)
 function Notice({children, tone = 'error', onDismiss, action}: {children: ReactNode; tone?: 'error'|'status'; onDismiss?: () => void; action?: ReactNode}) {
   return <div className="set-notice" data-tone={tone} role={tone === 'error' ? 'alert' : 'status'}>
     {tone === 'error' ? <AlertTriangle size={15} aria-hidden="true"/> : <Info size={15} aria-hidden="true"/>}
-    <span>{children}</span>
+    <div className="set-notice-body">{children}</div>
     {action}
     {onDismiss && <button type="button" className="set-notice-dismiss" aria-label="Dismiss message" title="Dismiss" onClick={onDismiss}><X size={14}/></button>}
   </div>;
@@ -119,6 +188,15 @@ function Artwork({path}: {path?: string|null}) {
 }
 
 type RowStatus = {kind: 'done'|'busy'|'problem'|'idle'; label: string; detail?: string};
+// Sources are looked for in the background as soon as a report is saved; this is where each entry stands before a playlist exists.
+const SOURCE_SEARCH: Record<SourceSearch, RowStatus> = {
+  queued: {kind: 'idle', label: 'Waiting to search'},
+  searching: {kind: 'busy', label: 'Finding sources…'},
+  ready: {kind: 'done', label: 'Source ready'},
+  choose: {kind: 'idle', label: 'Choose a version'},
+  none: {kind: 'idle', label: 'No source found yet'},
+  failed: {kind: 'problem', label: 'Search failed'},
+};
 function rowStatus(row: SetTrack, hasPlaylist: boolean, checking: boolean): RowStatus {
   if (row.playback_track_id) return {kind: 'done', label: 'In library'};
   if (row.track_id) return {kind: 'problem', label: 'File missing', detail: 'The audio file for this track was moved or deleted. Relink it from the library.'};
@@ -131,12 +209,15 @@ function rowStatus(row: SetTrack, hasPlaylist: boolean, checking: boolean): RowS
   if (row.unknown) return row.evidence?.length
     ? {kind: 'idle', label: 'Unknown track', detail: `The tracklist lists this entry without a name.${hasPlaylist ? ' Add a file if you know the track.' : ''}`}
     : {kind: 'idle', label: 'Unidentified audio', detail: `Recognition found no match for this part of the mix.${hasPlaylist ? ' Add a file if you know the track.' : ''}`};
-  if (!hasPlaylist) return {kind: 'idle', label: 'Not in library'};
+  if (!hasPlaylist) return (row.source_search && SOURCE_SEARCH[row.source_search]) || {kind: 'idle', label: 'Not in library'};
   if (row.source_options?.some(option => !option.reference_only)) return {kind: 'idle', label: 'Needs a source'};
   return row.error ? {kind: 'problem', label: 'No source found'} : {kind: 'idle', label: 'Needs a source'};
 }
 /** Entries a source search can act on: identified, not in the library, and with no download yet. */
-const searchable = (row: SetTrack) => !row.track_id && !row.playback_track_id && !row.download_id && !row.unknown && (!!row.artist || row.at === null);
+const searchable = (row: SetTrack) => !row.track_id && !row.playback_track_id && !row.download_id && !row.unknown && (!!row.artist || row.at === null || !!row.listed_link);
+/** Entries with a title of two or more words, no artist and no listed link: searched by title only, never chosen automatically. */
+const titleOnly = (row: SetTrack) => !row.track_id && !row.playback_track_id && !row.download_id && !row.unknown && !row.artist && !row.listed_link && row.at !== null
+  && (row.title || '').trim().split(/\s+/).filter(Boolean).length >= 2;
 
 export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdated, onPlaylist, onRetry}: {
   hidden: boolean; onUpdated: () => Promise<void>; onPlaylist: (id: string) => void; onRetry: (id: string) => Promise<void>;
@@ -154,16 +235,22 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
   const [url, setUrl] = useState('');
   const [file, setFile] = useState('');
   const [tracklist, setTracklist] = useState('');
-  const [recognize, setRecognize] = useState(false);
   const [youtubeAccess, setYoutubeAccess] = useState(savedYoutubeAccess);
+  // The access block opens from the link row, or by itself when YouTube refused access.
+  const [accessOpen, setAccessOpen] = useState(false);
   const [configured, setConfigured] = useState(false);
   const [spotifyToken, setSpotifyToken] = useState('');
   const [spotifyConnected, setSpotifyConnected] = useState(false);
   const [soundcloudToken, setSoundcloudToken] = useState('');
   const [soundcloudConnected, setSoundcloudConnected] = useState(false);
   const [formError, setFormError] = useState('');
+  // The engine's own wording of a failure, shown under Details while that failure is the one on screen.
+  const [formDetail, setFormDetail] = useState<{text: string; detail: string}|null>(null);
   const [accessError, setAccessError] = useState('');
-  const [tokenError, setTokenError] = useState('');
+  // Each token field shows only its own service's error.
+  const [tokenError, setTokenErrorState] = useState<{service: 'spotify'|'soundcloud'; text: string}|null>(null);
+  // A token field opened from a report note ("Connect Spotify and scan again").
+  const [reportToken, setReportToken] = useState(false);
 
   // The one scan this panel can run at a time, and what became of the last one.
   const [scanTask, setScanTask] = useState<Task|null>(null);
@@ -181,6 +268,7 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
   const reportRef = useRef(report); reportRef.current = report;
   const [name, setName] = useState('');
   const [reportError, setReportError] = useState('');
+  const [reportDetail, setReportDetail] = useState<{text: string; detail: string}|null>(null);
   const [reportNotice, setReportNotice] = useState('');
   // The access a paused scan will resume with. It starts as the one saved with the set and is stored when Resume is pressed.
   const [resumeAccess, setResumeAccess] = useState('');
@@ -209,7 +297,11 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
 
   const refreshSets = async () => { const next = await call<SavedSet[]>('sets.list'); if (mounted.current) setSaved(next); };
   const historyScanning = saved.some(item => item.automatic && item.offset !== null);
-  const failScan = (text: string) => { if (isYoutubeAccessError(text)) { setAccessError(text); setFormError(''); } else setFormError(text); };
+  const failScan = (text: string, detail?: string|null) => {
+    if (isYoutubeAccessError(text)) { setAccessError(text); setAccessOpen(true); setFormError(''); } else setFormError(text);
+    setFormDetail(detail ? {text, detail} : null);
+  };
+  const failReport = (text: string, detail?: string|null) => { setReportError(text); setReportDetail(detail ? {text, detail} : null); };
 
   /** One user action at a time; a second click while the first is still running is ignored. */
   const run = async (action: () => Promise<void>, fail: (text: string) => void) => {
@@ -219,7 +311,7 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
     catch (e) { if (mounted.current) fail(message(e)); }
     finally { pendingRef.current = false; if (mounted.current) setPending(false); }
   };
-  const showReport = (next: Report) => { setReport(next); setName(next.name); setSourceRow(null); setSourceUrl(''); setReportError(''); setReportNotice(''); };
+  const showReport = (next: Report) => { setReport(next); setName(next.name); setSourceRow(null); setSourceUrl(''); setReportError(''); setReportNotice(''); setReportToken(false); };
   const reloadReport = async (id: string) => {
     const revision = orderRevision.current;
     const next = await call<Report>('sets.get', {id});
@@ -247,19 +339,22 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
   usePolling(!hidden && view === 'history' && historyScanning, 4000, () => refreshSets());
 
   // --- Scanning ---------------------------------------------------------------
-  const startScan = () => run(async () => {
-    const link = mode === 'file' ? '' : url.trim();
-    setFormError(''); setAccessError(''); setScanNotice('');
-    audioPhase.current = mode === 'file';
+  /** Sends one scan request. Links are read for their tracklist; only an audio file is recognized from the start. */
+  const sendScan = async (scanMode: Mode, typed: string) => {
+    const link = scanMode === 'file' ? '' : stripTracking(typed).trim();
+    if (scanMode !== 'file' && link !== typed) setUrl(link);
+    setFormError(''); setFormDetail(null); setAccessError(''); setScanNotice('');
+    audioPhase.current = scanMode === 'file';
     setStartingScan(true);
     try {
       setScanTask(await call<Task>('sets.scan', {
-        url: link, path: mode === 'file' ? file : null, tracklist: mode === 'paste' ? tracklist : '',
-        fingerprint: mode === 'file' || (mode === 'link' && recognize && configured),
+        url: link, path: scanMode === 'file' ? file : null, tracklist: scanMode === 'paste' ? tracklist : '',
+        fingerprint: scanMode === 'file',
         youtube_browser: isYoutubeUrl(link) ? youtubeAccess || null : null,
       }));
     } finally { if (mounted.current) setStartingScan(false); }
-  }, failScan);
+  };
+  const startScan = () => run(() => sendScan(mode, url), failScan);
   const cancelScan = async () => {
     if (!scanTask || scanTask.state === 'cancelling') return;
     try { const next = await call<Task>('sets.cancel_task', {task_id: scanTask.id}); if (mounted.current) setScanTask(current => current?.id === next.id ? next : current); }
@@ -267,7 +362,7 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
   };
   const finishScan = async (done: Task) => {
     if (done.state === 'cancelled') setScanNotice(done.result ? 'Scan cancelled. The entries and audio samples found so far were saved.' : 'Scan cancelled. Nothing had been found yet, so no set was saved.');
-    else if (done.state === 'failed' || !done.result) failScan(done.error || 'The scan did not finish. Check the link or file, then try again.');
+    else if (done.state === 'failed' || !done.result) failScan(done.error || 'The scan did not finish. Check the link or file, then try again.', done.error_detail);
     if (!done.result) return;
     let result = done.result;
     try { result = await call<Report>('sets.get', {id: result.id}); } catch { /* the task's own copy is still valid */ }
@@ -306,7 +401,7 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
     if (!alive() || next.state === 'running' || next.state === 'cancelling') return;
     setJob(null);
     if (reportRef.current?.id === job.reportId) {
-      if (next.state === 'failed' || next.error) setReportError(next.error || (job.kind === 'local' ? 'The file could not be added.' : 'The source search did not finish. Try again.'));
+      if (next.state === 'failed' || next.error) failReport(next.error || (job.kind === 'local' ? 'The file could not be added.' : 'The source search did not finish. Try again.'), next.error_detail);
       const source = next.result?.tracks.find(row => row.entry_id === sourceRow);
       if (source?.track_id || (source?.download_id && !source.error)) setSourceRow(null);
       await reloadReport(job.reportId).catch(() => {});
@@ -395,7 +490,12 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
   const scanMoving = !!scan && (scan.automatic || scan.running || !!scan.cancelling);
   const rowWorkHere = !!report && (rowTasks.some(item => item.report_id === report.id) || queuedRows.some(key => key.startsWith(report.id + ':')));
   const sourceWorkHere = !!report && (rowTasks.some(item => item.report_id === report.id && item.entry_id !== 'artwork') || queuedRows.some(key => key.startsWith(report.id + ':')));
-  usePolling(!!report && !hidden && (scanMoving || downloading || jobHere || rowWorkHere), 1800, async alive => {
+  // Sources are found in the background after a scan; the report keeps reading them in while that runs.
+  const discovering = !!report?.discovery && report.discovery.pending + report.discovery.running > 0;
+  const recognition = report?.recognition || null;
+  // "Recognize audio too" runs as this report's audio scan; its results are merged into the published entries.
+  const recognizing = !!scan && !!recognition && recognition.state !== 'none' && recognition.state !== 'complete';
+  usePolling(!!report && !hidden && (scanMoving || downloading || jobHere || rowWorkHere || discovering || recognition?.state === 'running'), 1800, async alive => {
     const id = reportRef.current?.id;
     if (!id) return;
     try { await reloadReport(id); }
@@ -421,23 +521,81 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
   const openLink = (link: string, fail: (text: string) => void = setReportError) => invoke<void>('open_reference', {url: link}).catch(e => fail(message(e)));
   const rescanWithAccess = (current: Report) => {
     setMode('link'); setUrl(current.watch || '');
-    // The first scan asked for the audio; a rescan has to ask for it again.
-    if ((current.warning || '').includes(NOT_SCANNED_LEAD)) setRecognize(true);
-    setAccessError(scanNote(current.warning));
+    setAccessError(scanNote(current.warning)); setAccessOpen(true);
     setView('new');
   };
-  const connect = (service: 'spotify'|'soundcloud', token: string) => run(async () => {
-    setTokenError('');
+  /** Starts recognizing the audio of a set that was read from its published tracklist. */
+  const recognizeAudio = (current: Report, browser: string|null) => run(async () => {
+    setReportNotice(''); setReportError('');
+    const next = await call<Report>('sets.recognize', {id: current.id, youtube_browser: browser});
+    if (mounted.current && reportRef.current?.id === next.id) setReport(next);
+  }, failReport);
+  /** Scans a set's link again from New scan, for example after connecting Spotify. Runs inside the caller's action. */
+  const rescan = async (link: string) => {
+    setMode('link'); setUrl(link); setView('new');
+    try { await sendScan('link', link); }
+    catch (e) { if (mounted.current) failScan(message(e)); }
+  };
+  const connect = (service: 'spotify'|'soundcloud', token: string, then?: () => Promise<void>) => run(async () => {
+    setTokenErrorState(null);
     const result = await call<{connected: boolean}>(service === 'spotify' ? 'sets.configure_spotify' : 'sets.configure_soundcloud', {token});
     if (!mounted.current) return;
     if (service === 'spotify') { setSpotifyConnected(result.connected); setSpotifyToken(''); }
     else { setSoundcloudConnected(result.connected); setSoundcloudToken(''); }
-  }, setTokenError);
+    if (result.connected && then) await then();
+  }, text => setTokenErrorState(text ? {service, text} : null));
+  // A token is asked for only where it is needed: beside a Spotify error, or on a report that would gain from it.
+  const tokenField = (service: 'spotify'|'soundcloud', then?: {label: string; action: () => Promise<void>}) => {
+    const spotify = service === 'spotify';
+    const title = spotify ? 'Spotify' : 'SoundCloud', token = spotify ? spotifyToken : soundcloudToken, connected = spotify ? spotifyConnected : soundcloudConnected;
+    const setToken = spotify ? setSpotifyToken : setSoundcloudToken;
+    const submit = () => { if (token.trim() && !pendingRef.current) void connect(service, token.trim(), then?.action); };
+    return <div className="set-token">
+      <label htmlFor={`set-token-${service}`}>{title} access token <span className="set-token-state">{connected ? <><Check size={12} aria-hidden="true"/> Connected</> : 'Not connected'}</span></label>
+      <div className="set-form-line">
+        {/* Inside the scan form, Enter connects instead of starting a scan. */}
+        <input id={`set-token-${service}`} type="password" autoComplete="off" placeholder={`Paste a ${title} access token`} value={token} onChange={e => setToken(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}/>
+        <button type="button" disabled={pending || !token.trim()} onClick={submit}>{then ? then.label : connected ? 'Replace token' : 'Connect'}</button>
+        {connected && <button type="button" disabled={pending} onClick={() => void connect(service, '')}>Disconnect</button>}
+      </div>
+      <p className="set-hint">{spotify
+        ? 'Reads every entry of a long or private Spotify playlist. The token is kept until CrateLoom closes.'
+        : 'Downloads the original file when a creator has enabled downloads on SoundCloud. Find sources again after connecting. The token is kept until CrateLoom closes.'}</p>
+      {tokenError?.service === service && <Notice onDismiss={() => setTokenErrorState(null)}><ErrorText raw={tokenError.text}/></Notice>}
+    </div>;
+  };
 
   const scanLabel = audioPhase.current || (scanTask?.progress && ['bytes', 'seconds', 'samples'].includes(scanTask.progress.unit)) ? 'Scanning audio' : 'Reading tracklist';
   const canScan = mode === 'link' ? !!url.trim() : mode === 'file' ? !!file : !!tracklist.trim();
+  // A pasted or filled-in link loses its share and tracking parameters at once; typing is left alone until the field is left.
+  const typeLink = (value: string) => {
+    // One character typed, or a run of characters deleted, counts as typing.
+    let at = 0;
+    while (at < value.length && value[at] === url[at]) at++;
+    const typed = value.length === url.length + 1 ? url.slice(at) === value.slice(at + 1) : value.length < url.length && url.endsWith(value.slice(at));
+    setUrl(typed ? value : stripTracking(value));
+  };
+  const accessShown = (mode === 'link' && youtubeLink && accessOpen) || !!accessError;
+  const accessPanel = accessShown && <div id="set-access" className="set-access" data-error={!!accessError}>
+    <label className="set-youtube-access">YouTube access
+      <Select aria-label="YouTube access" aria-describedby="set-access-guide" value={youtubeAccess} disabled={scanActive} onChange={e => {
+        setYoutubeAccess(e.target.value); setAccessError('');
+        try { localStorage.setItem(ACCESS_STORAGE_KEY, e.target.value); } catch { /* the choice still applies to this session */ }
+      }}>
+        {YOUTUBE_ACCESS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+      </Select>
+    </label>
+    {accessError && <Notice onDismiss={() => setAccessError('')}><ErrorText raw={accessError} detail={formDetail?.text === accessError ? formDetail.detail : null}/></Notice>}
+    <ul id="set-access-guide" className="set-access-guide">
+      <li>{access.guide}</li>
+      {access.name && <li>Sign in to YouTube in {access.name} first and check that the mix plays there. The most recently used {access.name} profile is read.</li>}
+      {access.name && <li>The session is read on this Mac, only while a mix is scanned, and is not stored. This choice is remembered for later scans.</li>}
+    </ul>
+  </div>;
   const inLibrary = report?.tracks.filter(row => row.playback_track_id).length || 0;
   const toSearch = report?.tracks.filter(searchable).length || 0;
+  const toReview = report?.tracks.filter(titleOnly).length || 0;
   // After a playlist exists, entries that already offer versions to choose from need a choice, not another search.
   const unresolved = report?.tracks.filter(row => searchable(row) && !row.source_options?.some(option => !option.reference_only)) || [];
   const searchedBefore = unresolved.length > 0 && unresolved.every(row => !!row.error);
@@ -445,16 +603,26 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
   const note = report ? scanNote(report.warning) : '';
   const approximate = !!report && (!!report.scan?.fast || (report.warning || '').includes(APPROXIMATE_MARK) || report.tracks.some(row => row.evidence?.includes('Fingerprint')));
   const playOrder = report ? [...new Set(report.tracks.flatMap(item => item.playback_track_id ? [item.playback_track_id] : []))] : [];
+  // A set read from a YouTube mix's tracklist can have its audio recognized too, once, to confirm entries and add missed ones.
+  const canRecognize = !!report && configured && !!report.watch && isYoutubeVideo(report.watch) && !scan
+    && (!recognition || recognition.state === 'none' || recognition.state === 'failed')
+    && report.tracks.length > 0 && !report.tracks.every(row => row.evidence?.includes('Fingerprint'));
+  const notScanned = note.includes(NOT_SCANNED_LEAD);
+  const spotifyNote = !!report && cleanNote(report.warning) === SPOTIFY_PUBLIC_NOTE;
+  const sourcesReady = !report || report.playlist_id ? 0 : report.tracks.filter(row => row.source_search === 'ready' && searchable(row)).length;
+  const heard = scan ? report?.provisional || [] : [];
+  const spotifyFormError = /Spotify (authorization failed|could not share this playlist)/.test(formError);
+  const soundcloudNeeded = !!report && report.tracks.some(row => !row.track_id && (row.source_options?.some(option => option.reference_only) || /^Track page found/.test(row.error || '')));
 
   // What the unfinished audio scan of the open report is doing, and what the user can do about it.
   const scanStatus = (current: ReportScan): {state: ScanState; label: string; stage: string} => {
     const now = Date.now() / 1000;
     const position = `Checked up to ${timestamp(current.offset || 0)}${current.duration ? ` of ${timestamp(current.duration)}` : ''}.`;
-    if (current.running) return {state: 'running', label: 'Scanning audio', stage: current.progress?.stage || 'Recognizing the next section…'};
-    if (current.automatic && current.retry_at > now + 15) return {state: 'waiting', label: 'Audio scan waiting', stage: /rate limit/i.test(report?.warning || '')
+    if (current.running) return {state: 'running', label: recognizing ? `Recognizing audio · ${recognition!.confirmed} confirmed, ${recognition!.added} added` : 'Scanning audio', stage: current.progress?.stage || 'Recognizing the next section…'};
+    if (current.automatic && current.retry_at > now + 15) return {state: 'waiting', label: 'Audio scan waiting', stage: /rate limit|limiting requests/i.test((recognizing ? recognition!.warning : report?.warning) || '')
       ? `Shazam is rate limiting; continues at ${clock(current.retry_at)}. ${position}`
       : `Waiting before the next attempt; continues at ${clock(current.retry_at)}. ${position}`};
-    if (current.automatic) return {state: 'running', label: 'Scanning audio', stage: `Starting the next section… ${position}`};
+    if (current.automatic) return {state: 'running', label: recognizing ? `Recognizing audio · ${recognition!.confirmed} confirmed, ${recognition!.added} added` : 'Scanning audio', stage: `Starting the next section… ${position}`};
     if (current.stalled) return {state: 'stalled', label: 'Audio scan stopped', stage: `Several attempts in a row made no progress. ${position} Resume to try again.`};
     return {state: 'paused', label: 'Audio scan paused', stage: `${position} Matches and audio samples are saved. Resume to continue from there.`};
   };
@@ -483,13 +651,16 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
         {mode === 'link' && <>
           <label htmlFor="set-url">Mix or playlist link</label>
           <div className="set-form-line">
-            <input id="set-url" type="url" placeholder="YouTube mix, or a YouTube, Spotify or SoundCloud playlist" value={url} disabled={scanActive} onChange={e => setUrl(e.target.value)}/>
+            <input id="set-url" type="url" placeholder="YouTube mix, or a YouTube, Spotify or SoundCloud playlist" value={url} disabled={scanActive}
+              onChange={e => typeLink(e.target.value)} onBlur={() => setUrl(value => stripTracking(value))}/>
+            {youtubeLink && <button type="button" className="set-access-toggle" aria-label={`Access: ${access.name || 'Public'}, change YouTube access`} title={`YouTube access: ${access.label}`} aria-expanded={accessShown} aria-controls={accessShown ? 'set-access' : undefined} disabled={scanActive}
+              onClick={() => { if (accessShown) { setAccessOpen(false); setAccessError(''); } else setAccessOpen(true); }}>Access: {access.name || 'Public'}<ChevronDown size={14} aria-hidden="true"/></button>}
             <button className="primary" disabled={scanActive || pending || !canScan}><Search size={15} aria-hidden="true"/> Scan</button>
           </div>
-          <p className="set-hint">A published tracklist (description, chapters or comments) is read first. {configured ? 'If a YouTube mix has none, its audio is recognized with Shazam instead.' : 'Audio recognition is not installed, so mixes without a published tracklist cannot be scanned.'}</p>
-          {configured && <label className="set-check"><input type="checkbox" checked={recognize} disabled={scanActive} onChange={e => setRecognize(e.target.checked)}/>
-            Also recognize the audio when a tracklist is published</label>}
-          {configured && <p className="set-hint">Recognition runs online through Shazam, takes a few minutes per hour of audio, and gives approximate positions.</p>}
+          {accessPanel}
+          <p className="set-hint">{configured
+            ? 'Reads the published tracklist; if there is none, recognizes the audio with Shazam.'
+            : 'Reads the published tracklist. Audio recognition isn’t installed, so mixes without a tracklist can’t be scanned.'}</p>
         </>}
 
         {mode === 'file' && <>
@@ -504,62 +675,34 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
           </div>
           <p className="set-hint">{configured
             ? 'The mix (up to 3 hours) is recognized with Shazam: short samples are sent online and positions are approximate. Your file is not changed.'
-            : 'Audio recognition is not installed. Run scripts/setup-shazam-macos.sh, then restart CrateLoom.'}</p>
+            : 'Audio recognition isn’t installed. Run scripts/setup-shazam-macos.sh, then restart CrateLoom.'}</p>
         </>}
 
         {mode === 'paste' && <>
           <label htmlFor="set-tracklist">Tracklist</label>
           <textarea id="set-tracklist" placeholder={'00:00 Artist – Track\n03:45 Artist – Track'} rows={5} maxLength={100000} value={tracklist} disabled={scanActive} onChange={e => setTracklist(e.target.value)}/>
-          <p className="set-hint">One entry per line with its time, for example 00:00 Artist – Track. Lines without a time are skipped. The list is used as written; nothing is recognized from audio.</p>
+          <p className="set-hint">One line per entry with its time, for example 00:00 Artist – Track; lines without a time are skipped. Entries are used as written.{configured ? ' Add the YouTube mix link to recognize its audio from the report too.' : ''}</p>
           <label htmlFor="set-paste-url">Mix link (optional)</label>
           <div className="set-form-line">
-            <input id="set-paste-url" type="url" placeholder="Lets you jump to each entry in the mix" value={url} disabled={scanActive} onChange={e => setUrl(e.target.value)}/>
+            <input id="set-paste-url" type="url" placeholder="Lets you jump to each entry in the mix" value={url} disabled={scanActive}
+              onChange={e => typeLink(e.target.value)} onBlur={() => setUrl(value => stripTracking(value))}/>
             <button className="primary" disabled={scanActive || pending || !canScan}><Search size={15} aria-hidden="true"/> Scan</button>
           </div>
         </>}
 
-        {((mode === 'link' && youtubeLink) || accessError) && <div className="set-access" data-error={!!accessError}>
-          <label className="set-youtube-access">YouTube access
-            <Select aria-label="YouTube access" aria-describedby="set-access-guide" value={youtubeAccess} disabled={scanActive} onChange={e => {
-              setYoutubeAccess(e.target.value); setAccessError('');
-              try { localStorage.setItem(ACCESS_STORAGE_KEY, e.target.value); } catch { /* the choice still applies to this session */ }
-            }}>
-              {YOUTUBE_ACCESS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </Select>
-          </label>
-          {accessError && <Notice onDismiss={() => setAccessError('')}>{accessError}</Notice>}
-          <ul id="set-access-guide" className="set-access-guide">
-            <li>{access.guide}</li>
-            {access.name && <li>Sign in to YouTube in {access.name} first and check that the mix plays there. The most recently used {access.name} profile is read.</li>}
-            {access.name && <li>The session is read on this Mac, only while a mix is scanned, and is not stored. This choice is remembered for later scans.</li>}
-          </ul>
-        </div>}
-        {formError && <Notice onDismiss={() => setFormError('')}>{formError}</Notice>}
+        {mode !== 'link' && accessError && accessPanel}
+        {formError && <Notice onDismiss={() => { setFormError(''); setFormDetail(null); }}><ErrorText raw={formError} detail={formDetail?.text === formError ? formDetail.detail : null}/></Notice>}
+        {spotifyFormError && !scanActive && tokenField('spotify', {label: spotifyConnected ? 'Replace and scan again' : 'Connect and scan again', action: () => rescan(url)})}
       </form>
 
-      {scanActive ? <div className="set-progress-stage"><ScanProgress label={scanLabel} progress={scanTask?.progress} cancelling={scanTask?.state === 'cancelling'} onCancel={scanTask?.cancellable ? () => void cancelScan() : undefined}>
+      {scanActive && <div className="set-progress-stage"><ScanProgress label={scanLabel} progress={scanTask?.progress} cancelling={scanTask?.state === 'cancelling'} onCancel={scanTask?.cancellable ? () => void cancelScan() : undefined}>
         <p className="scan-progress-detail">You can keep working. Results open here when the scan finishes, and are saved in History.</p>
-      </ScanProgress></div> : <Disclosure className="set-connections" label="Advanced: Spotify and SoundCloud tokens">
-        <p className="set-hint">Optional. A token is only needed for the cases below, and is kept until CrateLoom closes.</p>
-        {([
-          ['spotify', 'Spotify', spotifyToken, setSpotifyToken, spotifyConnected, 'Reads every entry of a long or private Spotify playlist. Without it, only the entries on the public page are read.'],
-          ['soundcloud', 'SoundCloud', soundcloudToken, setSoundcloudToken, soundcloudConnected, 'Downloads the original file when a creator has enabled downloads on SoundCloud.'],
-        ] as ['spotify'|'soundcloud', string, string, (value: string) => void, boolean, string][]).map(([service, title, token, setToken, connected, purpose]) => <form key={service} className="set-token" onSubmit={e => { e.preventDefault(); if (token.trim()) void connect(service, token.trim()); }}>
-          <label htmlFor={`set-token-${service}`}>{title} access token <span className="set-token-state">{connected ? <><Check size={12} aria-hidden="true"/> Connected</> : 'Not connected'}</span></label>
-          <div className="set-form-line">
-            <input id={`set-token-${service}`} type="password" autoComplete="off" placeholder={`Paste a ${title} access token`} value={token} onChange={e => setToken(e.target.value)}/>
-            <button disabled={pending || !token.trim()}>{connected ? 'Replace token' : 'Connect'}</button>
-            {connected && <button type="button" disabled={pending} onClick={() => void connect(service, '')}>Disconnect</button>}
-          </div>
-          <p className="set-hint">{purpose}</p>
-        </form>)}
-        {tokenError && <Notice onDismiss={() => setTokenError('')}>{tokenError}</Notice>}
-      </Disclosure>}
+      </ScanProgress></div>}
     </div>}
 
     {view === 'history' && <section className="set-history-panel" aria-label="Scan history">
       <h2>Scan history</h2>
-      {historyError && <Notice onDismiss={() => setHistoryError('')}>{historyError}</Notice>}
+      {historyError && <Notice onDismiss={() => setHistoryError('')}><ErrorText raw={historyError}/></Notice>}
       {saved.length ? <ul className="set-history-list">{saved.map(item => {
         const state = item.offset !== null ? item.automatic ? 'Audio scan in progress' : 'Audio scan paused'
           : item.playlist_id ? `Playlist created · ${item.imported} of ${item.entries} in library${item.with_download ? ` · ${plural(item.with_download, 'download')} not finished` : ''}`
@@ -586,9 +729,14 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
         <div><h2>{report.name}</h2><small>
           {plural(report.tracks.length, 'entry', 'entries')} · {inLibrary} in library · {report.playlist_id ? 'Playlist created' : 'No playlist yet'}
           {approximate && <span title="Positions come from audio recognition and can be off. Check versions and transitions."> · Approximate positions</span>}
-          {report.scan?.offset === null && report.scan.duration !== null && ` · Audio scan complete (${timestamp(report.scan.duration)})`}
+          {report.scan?.offset === null && report.scan.duration !== null && !recognition?.confirmed && !recognition?.added && ` · Audio scan complete (${timestamp(report.scan.duration)})`}
+          {recognition?.state === 'complete' && ` · Audio recognized: ${recognition.confirmed} confirmed, ${recognition.added} added`}
         </small>
-          {report.watch && <button type="button" className="set-source-link" onClick={() => void openLink(report.watch!)}>Open on {sourceName(report.watch)}<ArrowUpRight size={12} aria-hidden="true"/></button>}
+          <div className="set-report-tools">
+            {report.watch && <button type="button" className="set-source-link" onClick={() => void openLink(report.watch!)}>Open on {sourceName(report.watch)}<ArrowUpRight size={12} aria-hidden="true"/></button>}
+            {canRecognize && !notScanned && <button type="button" className="set-recognize" disabled={reportBusy} title="Recognizes the mix audio with Shazam to confirm the entries and add any the tracklist missed. Runs in the background."
+              onClick={() => void recognizeAudio(report, report.youtube_browser ?? null)}><AudioLines size={15} aria-hidden="true"/> Recognize audio too</button>}
+          </div>
         </div>
         {report.playlist_id ? <div className="set-report-actions">
           <button disabled={reportBusy} onClick={() => onPlaylist(report.playlist_id!)}><ListMusic size={15} aria-hidden="true"/> Open playlist</button>
@@ -611,43 +759,69 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
           <div className="set-form-line">
             <input id="set-playlist-name" aria-label="Set playlist name" maxLength={100} value={name} disabled={reportBusy} onChange={e => setName(e.target.value)}/>
             <button className="primary" disabled={reportBusy || !name.trim()}>{toSearch > 0 ? 'Create playlist and find tracks' : 'Create playlist'}</button>
+            {(discovering || (toSearch > 0 && sourcesReady > 0)) && <span className="set-sources-ready" role="status">{discovering && <LoaderCircle size={13} className="spin" aria-hidden="true"/>}{plural(sourcesReady, 'source')} ready{discovering ? ' · still searching' : ''}</span>}
           </div>
-          <small>{inLibrary > 0 ? `Adds the ${plural(inLibrary, 'entry', 'entries')} already in your library to a new playlist` : 'Creates a new playlist'}{toSearch > 0 ? `, then searches for and downloads the ${inLibrary > 0 ? 'other ' : ''}${plural(toSearch, 'identified entry', 'identified entries')}. Entries with several possible versions wait for your choice.` : '.'}</small>
+          <small>{inLibrary > 0 ? `Adds the ${plural(inLibrary, 'entry', 'entries')} already in your library to a new playlist` : 'Creates a new playlist'}{toSearch > 0 ? `, then searches for and downloads the ${inLibrary > 0 ? 'other ' : ''}${plural(toSearch, 'identified entry', 'identified entries')}. Entries with several possible versions wait for your choice.` : '.'}{toReview > 0 ? ` ${plural(toReview, 'entry', 'entries')} without an artist ${toReview === 1 ? 'is' : 'are'} searched by title only; choose a version for ${toReview === 1 ? 'it' : 'each'} after the playlist is created.` : ''}</small>
         </form>}
       </div>
       {jobHere && <Notice tone="status">{job!.kind === 'local' ? 'Adding the file to your library…' : 'Searching for sources and starting downloads… Entries update as results arrive.'}</Notice>}
-      {reportError && <Notice onDismiss={() => setReportError('')}>{reportError}</Notice>}
+      {reportError && <Notice onDismiss={() => { setReportError(''); setReportDetail(null); }}><ErrorText raw={reportError} detail={reportDetail?.text === reportError ? reportDetail.detail : null}/></Notice>}
       {reportNotice && <Notice tone="status" onDismiss={() => setReportNotice('')}>{reportNotice}</Notice>}
-      {note && !scan && <Notice tone="status" action={isYoutubeAccessError(note) && report.watch ? <button type="button" onClick={() => rescanWithAccess(report)}>Change YouTube access and rescan</button> : undefined}>
-        {note.includes(NOT_SCANNED_LEAD)
-          ? <>{note} The entries below come from the tracklist.</>
-          : <><strong>Note from scanning this {report.watch && /playlist/.test(report.watch) ? 'playlist' : 'mix'}: </strong>{note}</>}</Notice>}
+      {note && !scan && <Notice tone="status" action={notScanned && canRecognize
+        ? <button type="button" disabled={reportBusy} onClick={() => void recognizeAudio(report, resumeAccess || null)}><AudioLines size={14} aria-hidden="true"/> Recognize audio too</button>
+        : spotifyNote && report.watch
+          ? spotifyConnected
+            ? <button type="button" disabled={pending} onClick={() => void run(() => rescan(report.watch!), failScan)}>Scan again</button>
+            : <button type="button" aria-expanded={reportToken} onClick={() => setReportToken(open => !open)}>Connect Spotify and scan again</button>
+          : isYoutubeAccessError(note) && report.watch ? <button type="button" onClick={() => rescanWithAccess(report)}>Change YouTube access and rescan</button> : undefined}>
+        {notScanned
+          ? <>{note} The entries below come from the tracklist.
+            {canRecognize && <label className="set-notice-access">YouTube access <Select aria-label="YouTube access for this set" value={resumeAccess} disabled={reportBusy} onChange={e => setResumeAccess(e.target.value)}>
+              {YOUTUBE_ACCESS.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </Select></label>}</>
+          : <><strong>Note from scanning this {report.watch && /playlist/.test(report.watch) ? 'playlist' : 'mix'}: </strong><ErrorText raw={note}/></>}</Notice>}
+      {spotifyNote && reportToken && !spotifyConnected && report.watch && !scan && tokenField('spotify', {label: 'Connect and scan again', action: () => rescan(report.watch!)})}
+      {recognition?.state === 'failed' && !scan && <Notice tone="status">Audio recognition stopped before the end of the mix.{recognition.warning && <> <ErrorText raw={recognition.warning}/></>}{canRecognize ? ' Recognize audio too starts it again.' : ''}</Notice>}
+      {soundcloudNeeded && <Disclosure className="set-connect" label={soundcloudConnected ? 'SoundCloud connected' : 'Connect SoundCloud'}>{tokenField('soundcloud')}</Disclosure>}
       {scan && (() => {
         const status = scanStatus(scan);
         const moving = scan.automatic || scan.running;
         const youtubeSet = !!report.watch && isYoutubeUrl(report.watch);
         const saved = YOUTUBE_ACCESS.find(item => item.value === (report.youtube_browser || '')) || YOUTUBE_ACCESS[0];
         const chosen = YOUTUBE_ACCESS.find(item => item.value === resumeAccess) || YOUTUBE_ACCESS[0];
+        // A recognition run keeps its own warning; the set's note is about the scan that published the entries.
+        const scanText = recognizing ? recognition!.warning || '' : note;
         return <div className="set-scan-status"><ScanProgress label={status.label} state={status.state} cancelling={scan.cancelling}
-          progress={scan.progress && scan.running ? scan.progress : {stage: status.stage, completed: scan.offset || 0, total: scan.duration, unit: 'steps'}}
+          progress={scan.progress && (scan.running || scan.progress.resume_at) ? scan.progress : {stage: status.stage, completed: scan.offset || 0, total: scan.duration, unit: 'steps'}}
           cancelLabel="Pause scan" onCancel={moving ? () => void run(async () => { const next = await call<Report>('sets.cancel_scan', {id: report.id}); if (mounted.current && reportRef.current?.id === next.id) setReport(next); }, setReportError) : undefined}>
-          {note && !(status.state === 'waiting' && /rate limit/i.test(note)) && <p className="scan-progress-detail">{isYoutubeAccessError(note) && !moving ? note : `Last attempt: ${note}`}</p>}
+          {/* Engine text (an OSError, a tool's output) becomes one sentence; the raw text sits under Details. */}
+          {scanText && !(status.state === 'waiting' && /rate limit|limiting requests/i.test(scanText)) && <div className="scan-progress-detail">{isYoutubeAccessError(scanText) && !moving ? <ErrorText raw={scanText}/> : <>Last attempt: <ErrorText raw={scanText}/></>}</div>}
+          {recognizing && status.state !== 'running' && <p className="scan-progress-detail">{recognition!.confirmed} confirmed, {recognition!.added} added so far</p>}
           {scan.samples > 0 && !scan.running && <p className="scan-progress-detail">{plural(scan.samples, 'audio sample')} saved{scan.pending_matches ? ` · ${plural(scan.pending_matches, 'match', 'matches')} waiting to be placed` : ''}</p>}
-          {moving && <p className="scan-progress-detail">Continues in the background; entries appear below as they are found.{youtubeSet && ` Uses ${saved.name ? `the ${saved.name} session` : 'public YouTube access'} (pause to change).`}</p>}
+          {moving && <p className="scan-progress-detail">Continues in the background; {recognizing ? 'confirmed and new entries appear below.' : 'entries appear below as they are found.'}{youtubeSet && ` Uses ${saved.name ? `the ${saved.name} session` : 'public YouTube access'} (pause to change).`}</p>}
+          {/* Resume comes first so it stays in view in the compact strip; the access choice beneath it applies to it. */}
+          {!moving && <button type="button" className="scan-progress-action" disabled={reportBusy || !configured} onClick={() => void run(async () => {
+            setScanNotice('');
+            const next = await call<Report>('sets.auto_scan', {id: report.id, enabled: true, ...(youtubeSet ? {youtube_browser: resumeAccess || null} : {})});
+            if (mounted.current && reportRef.current?.id === next.id) setReport(next);
+          }, setReportError)}>Resume audio scan</button>}
           {!moving && youtubeSet && <div className="set-resume-access">
             <label>Resume with <Select aria-label="YouTube access for this set" value={resumeAccess} disabled={reportBusy} onChange={e => setResumeAccess(e.target.value)}>
               {YOUTUBE_ACCESS.map(item => <option key={item.value} value={item.value}>{item.label}{item.value === saved.value ? ' (saved with this set)' : ''}</option>)}
             </Select></label>
             <p className="scan-progress-detail">{chosen.guide}{chosen.value !== saved.value && ' The new choice is saved with this set when you resume.'}</p>
           </div>}
-          {!moving && <button type="button" disabled={reportBusy || !configured} onClick={() => void run(async () => {
-            setScanNotice('');
-            const next = await call<Report>('sets.auto_scan', {id: report.id, enabled: true, ...(youtubeSet ? {youtube_browser: resumeAccess || null} : {})});
-            if (mounted.current && reportRef.current?.id === next.id) setReport(next);
-          }, setReportError)}>Resume audio scan</button>}
           {!moving && !configured && <p className="scan-progress-detail">Audio recognition is not installed, so this scan cannot continue.</p>}
         </ScanProgress></div>;
       })()}
+      {heard.length > 0 && <section className="set-provisional" aria-label="Heard so far">
+        <h3>Heard so far <span>(placed when the scan finishes)</span></h3>
+        <ol>{heard.map(item => <li key={`${item.at}:${item.artist}:${item.title}`}>
+          <span className="time">{timestamp(item.at)}</span>
+          <span>{item.artist ? `${item.artist} – ${item.title}` : item.title}</span>
+          {item.samples <= 1 && <small>Heard once</small>}
+        </li>)}</ol>
+      </section>}
 
       <ol className="set-tracklist" aria-label="Set tracklist">
         {report.tracks.map((row, index) => {
@@ -699,10 +873,11 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
               <strong>{row.title}</strong>
               {row.artist && <small>{row.artist}</small>}
               {row.version_warning && <small>{row.version_warning}</small>}
+              {!!row.recognized_other?.length && <small>Also heard during this entry: {row.recognized_other.map(other => [other.artist, other.title].filter(Boolean).join(' – ')).join('; ')}</small>}
               {row.needs_review && !row.unknown && !trackId && <small>Uncertain match. Check the title and artist before downloading.</small>}
               {status.detail && <small>{status.detail}</small>}
               {problem && <DownloadError error={problem} announce={false}/>}
-              {rowErrors[key] && <Notice onDismiss={() => setRowErrors(errors => ({...errors, [key]: ''}))}>{rowErrors[key]}</Notice>}
+              {rowErrors[key] && <Notice onDismiss={() => setRowErrors(errors => ({...errors, [key]: ''}))}><ErrorText raw={rowErrors[key]}/></Notice>}
               {row.download_state === 'downloading' && <DownloadProgress title={row.title} received={row.downloaded_bytes || 0} total={row.total_bytes ?? null}/>}
               {recommended && sourceChoice(recommended)}
               {others.length > 0 && <Disclosure label={recommended ? `Other sources · ${others.length}` : `Review sources · ${others.length}`}>

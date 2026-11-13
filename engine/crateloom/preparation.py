@@ -3,6 +3,7 @@ import hashlib,json,os,re,subprocess,threading,urllib.parse,urllib.request,uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from .metadata_matching import catalog_identity
+from .errors import public_error
 
 FIELDS=('title','artist','album','genre','date')
 # ID3 stores dates as timestamps; other spellings do not survive the verified read-back.
@@ -69,7 +70,9 @@ def launch(fn,incremental=False,control=None):
                     control.result=result
                     JOBS[jid].update(result=result,state='cancelled' if control.stop.is_set() else 'completed')
             else:JOBS[jid].update(result=result,state='completed')
-        except Exception as error:JOBS[jid].update(error=None if control and control.stop.is_set() else str(error),result=control.result if control else None,state='cancelled' if control and control.stop.is_set() else 'failed')
+        except Exception as error:
+            stopped=bool(control and control.stop.is_set());message,code,detail=public_error(error)
+            JOBS[jid].update(error=None if stopped else message,error_code=None if stopped else code,error_detail=None if stopped else detail,result=control.result if control else None,state='cancelled' if stopped else 'failed')
         finally:
             if control:control.finish()
     # Return the same pending contract even when a cached/local result finishes
