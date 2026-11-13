@@ -12,6 +12,8 @@ case "$(uname -s):$(uname -m)" in
 esac
 mkdir -p "$BUILD_ROOT/source"
 rsync -a --exclude='._*' --exclude='.git' --exclude='node_modules' --exclude='target' --exclude='dist' "$REPO_ROOT/" "$BUILD_ROOT/source/"
+# A copy made by another tool can leave AppleDouble files behind; Tauri fails to read them.
+find "$BUILD_ROOT/source" -name '._*' -not -path '*/node_modules/*' -delete
 cd "$BUILD_ROOT/source"
 ./scripts/build-sidecar-macos.sh
 python3 scripts/test-sidecar.py "$CRATELOOM_SIDECAR_BUILD_DIR/dist/crateloom-engine"
