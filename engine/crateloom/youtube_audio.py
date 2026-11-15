@@ -19,10 +19,15 @@ from . import download_http, service_links
 from .metadata_matching import search_identity
 
 NAMES = ('YouTube', 'YouTube Music')
-FIELDS = '%(.{id,title,artist,duration,url,ext,protocol,format_id,filesize,filesize_approx,http_headers,is_live,availability})j'
+FIELDS = '%(.{id,title,artist,duration,url,ext,protocol,format_id,filesize,filesize_approx,http_headers,is_live,availability,available_at})j'
 MEDIA_CACHE = {}
 MEDIA_LOCK = threading.Lock()
 MEDIA_TTL = 120
+# YouTube issues audio addresses that answer 403 until a moment after they are issued (yt-dlp's
+# "available_at"; about six seconds). Each address is held back until then, keyed by address.
+READY = {}
+READY_LOCK = threading.Lock()
+READY_MAX_WAIT = 60
 # Every yt-dlp search shares these slots, so background lookups cannot flood YouTube.
 SEARCH_SLOTS = threading.BoundedSemaphore(4)
 SEARCH_CACHE = {}
@@ -226,6 +231,34 @@ def onedir_executable():
             ONEDIR['thread'].start()
         ONEDIR['path'] = ready
         return ready
+
+
+def note_ready(media, available_at):
+    """Remember when a resolved address starts answering; addresses with no such time are ready at once."""
+    if type(available_at) not in (int, float):
+        return
+    stamp = time.monotonic()
+    ready = stamp + min(READY_MAX_WAIT, max(0, available_at - time.time()))
+    with READY_LOCK:
+        for key, (until, _) in list(READY.items()):
+            if until <= stamp:
+                READY.pop(key)
+        while len(READY) >= 256:
+            READY.pop(next(iter(READY)))
+        READY[media] = (stamp + MEDIA_TTL + READY_MAX_WAIT, ready)
+
+
+def wait_until_ready(media, check=lambda: None, waiting=lambda: None):
+    """Hold a transfer until YouTube serves the address; ``check`` may raise to cancel the wait."""
+    with READY_LOCK:
+        entry = READY.get(media)
+    if not entry or entry[1] <= time.monotonic():
+        return
+    waiting()
+    while (remaining := entry[1] - time.monotonic()) > 0:
+        check()
+        time.sleep(min(.25, remaining))
+    check()
 
 
 def executable():
@@ -470,6 +503,7 @@ def resolve(api, reference, format_id=None, *, scan=False):
             'url': page, 'display_url': page, 'filename': title + '.' + data['ext'], 'format_id': selected,
             'duration': duration, 'declared_bytes': size, 'version': identity['version'],
             'values': {'title': identity['title'] or title, 'artist': identity['artist']}}
+    note_ready(media, data.get('available_at'))
     if format_id is None:
         with MEDIA_LOCK:
             stamp = time.monotonic()

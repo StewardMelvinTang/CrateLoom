@@ -146,6 +146,45 @@ class Acquisitions(unittest.TestCase):
         stream_hash=lambda path:subprocess.run(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-c','copy','-f','hash','-hash','sha256','-'],check=True,capture_output=True,text=True).stdout
         self.assertEqual(stream_hash(target),stream_hash(dash))
         self.assertEqual(list((self.root/'acquisition-work').iterdir()),[])
+    def test_youtube_download_waits_until_the_audio_address_is_served(self):
+        # YouTube answers 403 for an audio address until its available_at time, a few seconds after it is issued.
+        m4a=self.root/'fixture.m4a'
+        subprocess.run(['ffmpeg','-v','error','-i',str(self.wav),'-c:a','aac',str(m4a)],check=True)
+        audio=m4a.read_bytes()
+        signed='https://r1.googlevideo.com/videoplayback?token=waits'
+        url='https://www.youtube.com/watch?v=uXn-zOt68V8'
+        data={'id':'uXn-zOt68V8','title':'Test Artist - Test Title','duration':1,'ext':'m4a','protocol':'https','format_id':'140','url':signed,'filesize':len(audio),'availability':'public'}
+        process=api.import_process
+        def run(args,timeout,**options):
+            if args[0]=='/tools/yt-dlp':
+                self.assertIn('available_at',args[args.index('--print')+1])
+                return SimpleNamespace(stdout=json.dumps({**data,'available_at':time.time()+1.2}))
+            return process(args,timeout,**options)
+        opened=[]
+        def response(url,**kwargs):
+            opened.append(time.monotonic())
+            r=Response(audio,mime='audio/mp4');r.url=signed
+            return r
+        with patch.object(youtube_audio,'executable',return_value='/tools/yt-dlp'),patch.object(api,'import_process',side_effect=run),patch.object(download_http,'open_url',side_effect=response):
+            source=providers.resolve(api,url)['candidates'][0]
+            issued=time.monotonic()
+            job=self.finish(api.dispatch('acquisitions.enqueue',{'source_id':source['id'],'values':source['values']})['id'])
+        self.assertEqual(job['state'],'completed',job)
+        self.assertGreaterEqual(opened[0]-issued,1.0)
+    def test_waiting_for_a_youtube_address_can_be_cancelled(self):
+        youtube_audio.note_ready('https://r1.googlevideo.com/videoplayback?token=later',time.time()+30)
+        def check():raise acquisitions.ImportCancelled()
+        started=time.monotonic()
+        with self.assertRaises(acquisitions.ImportCancelled):
+            youtube_audio.wait_until_ready('https://r1.googlevideo.com/videoplayback?token=later',check)
+        self.assertLess(time.monotonic()-started,1)
+        # Addresses with no available_at, or one already passed, are fetched at once.
+        youtube_audio.note_ready('https://r1.googlevideo.com/videoplayback?token=past',time.time()-5)
+        youtube_audio.note_ready('https://r1.googlevideo.com/videoplayback?token=none',None)
+        started=time.monotonic()
+        for name in ('past','none','unknown'):
+            youtube_audio.wait_until_ready('https://r1.googlevideo.com/videoplayback?token='+name,check)
+        self.assertLess(time.monotonic()-started,.1)
     def test_unicode_filename_stays_within_filesystem_byte_limit(self):
         providers.CANDIDATES[self.source['id']]['value']['filename']='音楽'*90+'.wav'
         with patch.object(download_http,'open_url',side_effect=lambda *a,**k:Response(self.audio)):

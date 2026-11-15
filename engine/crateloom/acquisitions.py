@@ -184,6 +184,7 @@ class AudioTransfer:
         return info, received, self.api.file_hash(partial)
 
     def transfer(self, jid, source, url, headers, partial, check, *, ranges):
+        youtube_audio.wait_until_ready(url, check, lambda: self.update(jid,stage='Waiting for YouTube…'))
         if ranges and (source.get('declared_bytes') or 0) >= 2*RANGE_SIZE:
             try:
                 return self.transfer_ranges(jid, source, url, headers, partial, check)
