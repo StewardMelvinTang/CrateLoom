@@ -1332,8 +1332,7 @@ def report(db, sid):
                 # progress (YouTube, the network, a decode error) the backoff is a plain wait.
                 stage = 'Waiting before the next attempt' if auto['failures'] and state['retry_at'] > limited else 'Waiting for Shazam'
                 result['scan']['retry_at'] = resume_at
-                result['scan']['progress'] = {'stage':stage,'completed':state['offset'],'total':state['duration'],
-                                              'unit':'seconds','resume_at':resume_at}
+                result['scan']['progress'] = waiting_progress(state, stage, resume_at)
         result['scan']['pending_matches']=sum(bool(match) for match in state.get('plan',{}).get('samples',{}).values())
         result['provisional'] = provisional(state, control)
     else:
@@ -1382,6 +1381,27 @@ def report(db, sid):
                     downloaded_bytes=row['downloaded_bytes'], total_bytes=row['total_bytes'])
         result['tracks'].append(item)
     return result
+
+
+def waiting_progress(state, stage, resume_at):
+    """Progress for a scan that waits to continue, in the shape its worker reports while running.
+
+    A sampled (fast) pass keeps its offset at the start of the batch until the batch ends, so its
+    position is the furthest sample taken, not the offset; the offset alone would read 0:00.
+    """
+    plan = state.get('plan')
+    samples = plan.get('samples') if isinstance(plan, dict) else None
+    if not isinstance(samples, dict):
+        return {'stage':stage,'completed':state['offset'],'total':state['duration'],'unit':'seconds','resume_at':resume_at}
+    taken = []
+    for at in samples:
+        try:
+            taken.append(float(at))
+        except (TypeError, ValueError):
+            continue
+    found = {match.get('key') for match in samples.values() if isinstance(match, dict) and match.get('key')}
+    return {'stage':stage,'completed':len(taken),'total':None,'unit':'samples','position':max(taken, default=state['offset'] or 0),
+            'duration':state['duration'],'tracks_found':len(found),'resume_at':resume_at}
 
 
 def provisional(state, control):

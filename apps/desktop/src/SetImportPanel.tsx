@@ -797,7 +797,7 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
           {/* Engine text (an OSError, a tool's output) becomes one sentence; the raw text sits under Details. */}
           {scanText && !(status.state === 'waiting' && /rate limit|limiting requests/i.test(scanText)) && <div className="scan-progress-detail">{isYoutubeAccessError(scanText) && !moving ? <ErrorText raw={scanText}/> : <>Last attempt: <ErrorText raw={scanText}/></>}</div>}
           {recognizing && status.state !== 'running' && <p className="scan-progress-detail">{recognition!.confirmed} confirmed, {recognition!.added} added so far</p>}
-          {scan.samples > 0 && !scan.running && <p className="scan-progress-detail">{plural(scan.samples, 'audio sample')} saved{scan.pending_matches ? ` · ${plural(scan.pending_matches, 'match', 'matches')} waiting to be placed` : ''}</p>}
+          {scan.samples > 0 && !scan.running && scan.progress?.unit !== 'samples' && <p className="scan-progress-detail">{plural(scan.samples, 'audio sample')} saved{scan.pending_matches ? ` · ${plural(scan.pending_matches, 'match', 'matches')} waiting to be placed` : ''}</p>}
           {moving && <p className="scan-progress-detail">Continues in the background; {recognizing ? 'confirmed and new entries appear below.' : 'entries appear below as they are found.'}{youtubeSet && ` Uses ${saved.name ? `the ${saved.name} session` : 'public YouTube access'} (pause to change).`}</p>}
           {/* Resume comes first so it stays in view in the compact strip; the access choice beneath it applies to it. */}
           {!moving && <button type="button" className="scan-progress-action" disabled={reportBusy || !configured} onClick={() => void run(async () => {

@@ -99,7 +99,7 @@ const fs=require('fs'); const assert=require('node:assert/strict');
  case 'sets.list':return [{id:'set',name:report.name,playlist_id:report.playlist_id,entries:report.tracks.length,imported:1,with_download:0,offset:null,duration:null,automatic:0,created_at:null}];
  case 'sets.get':{
    // Shazam asked the scan to wait: the engine reports when it resumes.
-   if(window.__qaShazamWait){window.__qaShazamWait=false;const resume=Date.now()/1000+95;report.scan={...report.scan,automatic:true,running:false,retry_at:resume,progress:{stage:'Waiting for Shazam',completed:300,total:1800,unit:'seconds',resume_at:resume}};}
+   if(window.__qaShazamWait){window.__qaShazamWait=false;const resume=Date.now()/1000+95;report.scan={...report.scan,automatic:true,running:false,retry_at:resume,samples:8,pending_matches:8,progress:{stage:'Waiting for Shazam',completed:8,total:null,unit:'samples',position:391,duration:6730,tracks_found:4,resume_at:resume}};}
    // A stalled attempt (here a full disk) waits too, but not for Shazam; its raw engine text stays under Details.
    if(window.__qaStallWait){window.__qaStallWait=false;window.__qaSavedWarning=report.warning;const resume=Date.now()/1000+95;report.warning="Partial scan. [Errno 28] No space left on device: '/Users/qa/Library/Caches/CrateLoom/set-audio'";report.scan={...report.scan,automatic:true,running:false,retry_at:resume,progress:{stage:'Waiting before the next attempt',completed:300,total:1800,unit:'seconds',resume_at:resume}};}
    // A row with no artist but a listed link (report.listed_link), and back.
@@ -534,14 +534,14 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await pauseScan.click();await resumeScan.waitFor();
  assert.match(await scanStatus.innerText(),/Audio scan paused[\s\S]*2 confirmed, 1 added so far/);
  checks.sourceSearch='a published tracklist opens at once; rows show Waiting to search, Finding sources… (spinner), Source ready and Choose a version before a playlist exists; the header counts ready sources beside an unchanged Create playlist and find tracks';
- checks.shazamWait='a scan Shazam asked to wait shows Waiting for Shazam with a countdown from progress.resume_at and keeps Pause scan; a stall backoff shows the engine\'s neutral Waiting before the next attempt, and its raw OSError warning reads as one sentence with the engine text under Details';
+ checks.shazamWait='a scan Shazam asked to wait shows Waiting for Shazam with a countdown from progress.resume_at, says how far a sampled scan has got (not 0:00) and keeps Pause scan; a stall backoff shows the engine\'s neutral Waiting before the next attempt, and its raw OSError warning reads as one sentence with the engine text under Details';
  checks.recognize='Recognize audio too on a YouTube tracklist report sends sets.recognize {id, youtube_browser}, shows Recognizing audio with confirmed and added counts in the scan status, lists heard recordings without actions, and pauses';
  // A finished scan opens as a report whose audio scan continues by itself and can be paused there.
  await page.getByRole('button',{name:'New scan',exact:true}).click();assert.equal(await link.inputValue(),'');
  await link.fill('https://www.youtube.com/watch?v=RvRhUHTV_8k');await page.evaluate(()=>{window.__qaFinishPublished=false;});
  await scanButton.click();await page.evaluate(()=>window.__qaFinishScan=true);
  await scanStatus.getByText('Scanning audio',{exact:true}).waitFor();
- assert.match(await scanStatus.innerText(),/7 audio samples checked[\s\S]*Audio position 6:00 \/ 30:00 \xb7 2 recordings found[\s\S]*Uses public YouTube access \(pause to change\)\./);
+ assert.match(await scanStatus.innerText(),/7 audio samples checked[\s\S]*Sampled up to 6:00 of 30:00 \xb7 2 recordings found[\s\S]*Uses public YouTube access \(pause to change\)\./);
  // An unknown total animates the bar instead of claiming a value.
  assert.equal(await scanStatus.getByRole('progressbar',{name:'Scan progress',exact:true}).getAttribute('value'),null);
  assert.equal(await page.locator('.set-provisional li').count(),2);
@@ -562,6 +562,9 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await page.evaluate(()=>window.__qaShazamWait=true);await scanStatus.getByText('Waiting for Shazam',{exact:true}).waitFor();
  assert.match(await text(scanStatus.locator('.scan-progress-countdown')),/^Continues automatically in 1:3\d$/);
  assert.equal(await scanStatus.locator('.scan-progress').getAttribute('data-state'),'waiting');assert.equal(await pauseScan.isVisible(),true);
+ // A sampled scan that waits says how far it has sampled, not the batch start ("0:00 checked"), and says the sample count once.
+ {const waiting=await scanStatus.innerText();assert.match(waiting,/8 audio samples checked[\s\S]*Sampled up to 6:31 of 1:52:10 \xb7 4 recordings found/);
+  assert.doesNotMatch(waiting,/0:00 of|samples saved/);}
  await pauseScan.click();await resumeScan.waitFor();
  await resumeScan.click();await pauseScan.waitFor();
  await page.evaluate(()=>window.__qaStallWait=true);await scanStatus.getByText('Waiting before the next attempt',{exact:true}).waitFor();

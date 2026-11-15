@@ -30,6 +30,8 @@ export function ScanProgress({label,progress,state='running',cancelling=false,on
   const left=useCountdown(progress?.resume_at);
   const shown:ScanState=left>0 && state==='running'?'waiting':state;
   const busy=shown==='running' || cancelling;
+  // A sampled pass has no total: after its first pass it goes back to refine transitions, so how
+  // far it has sampled is said in words rather than drawn as a bar that would read full too early.
   const measured=!!progress?.total && progress.total>0;
   const completed=Math.max(0,progress?.completed || 0);
   const detail=progress?.unit==='bytes'?`${bytes(completed)}${measured?` of ${bytes(progress.total!)}`:''} downloaded`:
@@ -45,7 +47,7 @@ export function ScanProgress({label,progress,state='running',cancelling=false,on
     {/* A bar without a value animates, so it is only shown while work is really happening or a position is known. */}
     {(busy || measured) && <progress aria-label="Scan progress" {...(measured?{max:progress.total!,value:Math.min(completed,progress.total!)}:{})}/>}
     {detail && <p className="scan-progress-detail time">{detail}</p>}
-    {progress?.unit==='samples' && progress.position!=null && <p className="scan-progress-detail time">Audio position {time(progress.position)}{progress.duration?` / ${time(progress.duration)}`:''}{progress.tracks_found!=null?` · ${progress.tracks_found} recordings found`:''}</p>}
+    {progress?.unit==='samples' && progress.position!=null && <p className="scan-progress-detail time">Sampled up to {time(progress.position)}{progress.duration?` of ${time(progress.duration)}`:''}{progress.tracks_found!=null?` · ${progress.tracks_found} ${progress.tracks_found===1?'recording':'recordings'} found`:''}</p>}
     {children}
     {onCancel && <button type="button" className="scan-progress-action" disabled={cancelling} onClick={onCancel}>{cancelling?'Stopping…':cancelLabel}</button>}
   </div>;

@@ -819,6 +819,22 @@ class SetImport(unittest.TestCase):
             failed = self.settle(api.dispatch('sets.resume_scan',{'id':sid}))
             self.assertRegex(failed['error'],r'Resume in (59\d|600) seconds')
 
+    def test_waiting_sampled_scan_reports_how_far_it_has_sampled(self):
+        # A sampled pass keeps its offset at the batch start, so the wait must not read "0:00 checked".
+        first, second = ({'key':key,'title':title,'artist':'Artist'} for key,title in (('1','First'),('2','Second')))
+        plan = {'samples':{'0':first,'60':first,'152':second,'391':None},'serial':False}
+        sid = set_import.save_report(api,'Mix',None,[],'Partial scan.',checkpoint=(0,6730,'mix.wav',0),plan=plan)['id']
+        shazam_scan.save_cooldown(api,90)
+        with patch.object(shazam_scan,'scan',side_effect=AssertionError('Inside the cooldown')):
+            self.assertFalse(set_import.auto_scan_step(api))
+        progress = api.dispatch('sets.get',{'id':sid})['scan']['progress']
+        self.assertEqual(progress['stage'],'Waiting for Shazam')
+        self.assertEqual({field:progress[field] for field in ('unit','completed','position','duration','tracks_found')},
+                         {'unit':'samples','completed':4,'position':391,'duration':6730,'tracks_found':2})
+        self.assertGreater(progress['resume_at'],time.time()+80)
+        # A pass that has not sampled yet still reports its place in seconds.
+        self.assertEqual(set_import.waiting_progress({'offset':120,'duration':600},'Waiting for Shazam',1)['unit'],'seconds')
+
     def test_report_lists_provisional_hits(self):
         first, second, third = ({'key':key,'title':title,'artist':'Artist'} for key,title in (('1','First'),('2','Second'),('3','Third')))
         plan = {'samples':{'0':first,'60':first,'120':second,'180':second},'serial':False}
