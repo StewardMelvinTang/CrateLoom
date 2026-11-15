@@ -1,0 +1,157 @@
+/* Import DJ Set. Loaded after the global sheets, so equal-specificity rules here win. */
+
+/* Navigation: the open set is named, so the way back to it is always visible. */
+.set-navigation-open { min-width: 0; max-width: min(340px, 100%); }
+.set-navigation-open > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.set-navigation button svg { flex-shrink: 0; }
+
+/* Messages sit beside what they are about and can be dismissed. */
+.set-notice { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--text); font-size: 12px; line-height: 1.5; }
+.set-notice[data-tone=error] { border-color: var(--control-line); }
+.set-notice > svg { flex: none; margin-top: 2px; }
+.set-workspace .set-notice-body { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--text); font-size: 12px; }
+/* Engine wording stays available under Details, out of the way of the sentence. */
+.set-error-details { margin-top: 2px; }
+.set-workspace .set-error-details > .disclosure-toggle { padding: 3px 0; font-size: 11px; }
+.set-error-details code { display: block; margin-top: 4px; padding: 6px 8px; border-radius: 6px; background: var(--bg); color: var(--muted); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.set-notice-access { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 8px; color: var(--text); }
+.set-notice > button { flex: none; padding: 4px 8px; font-size: 12px; white-space: normal; text-align: left; }
+.set-workspace .set-notice-dismiss { flex: none; padding: 3px; border-color: transparent; background: transparent; color: var(--muted); }
+.set-workspace .set-notice-dismiss:hover { color: var(--text); border-color: var(--line); }
+.set-background-status > svg { flex: none; }
+
+/* New scan */
+.set-new { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.set-workspace .set-form { gap: 8px; padding-bottom: 12px; }
+.set-modes { min-width: 0; margin: 0 0 6px; padding: 0; border: 0; }
+.set-modes legend { padding: 0; margin-bottom: 6px; font-size: 12px; color: var(--muted); }
+.set-mode-options { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--control-line); border-radius: 7px; background: var(--surface); }
+.set-workspace .set-mode-options label { position: relative; padding: 7px 13px; font-size: 13px; color: var(--text); cursor: pointer; border-right: 1px solid var(--line); }
+.set-workspace .set-mode-options label:first-child { border-radius: 6px 0 0 6px; }
+.set-workspace .set-mode-options label:last-child { border-right: 0; border-radius: 0 6px 6px 0; }
+.set-workspace .set-mode-options label[data-checked=true] { background: var(--text); color: var(--bg); }
+.set-mode-options input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.set-mode-options label:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+.set-modes:disabled .set-mode-options { opacity: .55; }
+.set-modes:disabled label, .set-modes:disabled input { cursor: not-allowed; }
+.set-workspace .set-hint { display: block; margin: 0; max-width: 76ch; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.set-label { font-size: 12px; color: var(--muted); }
+.set-form textarea { width: 100%; }
+.set-file-name { flex: 1 1 160px; min-width: 0; align-self: center; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.set-form-line > button { flex: none; }
+/* The YouTube access choice sits in the link row and opens its block underneath. */
+.set-workspace .set-access-toggle { gap: 4px; font-size: 12px; color: var(--text); }
+.set-access-toggle > svg { transition: transform 220ms cubic-bezier(.16,1,.3,1); }
+.set-access-toggle[aria-expanded=true] > svg { transform: rotate(180deg); }
+
+.set-access { display: grid; gap: 8px; max-width: 780px; margin-top: 2px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.set-access[data-error=true] { border-color: var(--control-line); }
+.set-workspace .set-youtube-access { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0; color: var(--text); font-weight: 600; }
+.set-youtube-access .select-field { font-weight: 400; }
+.set-access .set-notice { margin: 0; background: var(--bg); }
+
+.set-token { display: grid; gap: 6px; max-width: 780px; margin-top: 6px; }
+.set-report > .set-token { margin: 0 0 10px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.set-workspace .set-connect { margin: 0 0 8px; }
+.set-token-state { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; color: var(--text); }
+
+/* History */
+.set-history-state { display: inline-flex; align-items: center; gap: 4px; color: var(--text); vertical-align: bottom; }
+.set-history-open small { line-height: 1.5; }
+.set-history-confirm small { max-width: 34ch; line-height: 1.4; }
+.set-history-panel > .set-notice { margin-top: 0; }
+
+/* Report header */
+.set-report-head { align-items: flex-start; gap: 12px 20px; }
+.set-report-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.set-report-actions button, .set-playlist-create button { font-size: 12px; }
+.set-workspace .set-source-link { display: inline-flex; margin-top: 6px; padding: 2px 0; gap: 3px; border: 0; background: transparent; color: var(--muted); font-size: 12px; text-decoration: underline; text-underline-offset: 2px; }
+.set-workspace .set-source-link:hover { color: var(--text); }
+.set-report-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 14px; margin-top: 6px; }
+.set-report-tools .set-source-link { margin-top: 0; }
+.set-workspace .set-recognize { gap: 6px; padding: 5px 9px; font-size: 12px; }
+.set-workspace .set-sources-ready { display: inline-flex; align-items: center; gap: 5px; align-self: center; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.set-workspace .set-playlist-create { display: grid; gap: 6px; flex: 1 1 340px; max-width: 520px; }
+.set-workspace .set-playlist-create input { display: block; width: auto; flex: 1 1 180px; min-width: 0; }
+.set-playlist-create small { line-height: 1.5; }
+.set-report > .set-notice strong { font-weight: 600; }
+
+/* Unfinished audio scan of the open report */
+.set-workspace .set-scan-status { display: grid; place-items: center; margin: 4px 0 16px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.set-workspace .set-inline-action { display: inline; padding: 0; border: 0; background: transparent; color: var(--text); font-size: inherit; text-decoration: underline; text-underline-offset: 2px; white-space: normal; }
+
+/* What the running audio scan has heard; these become entries when it finishes. */
+.set-provisional { margin: 0 0 14px; padding: 10px 12px; border: 1px dashed var(--line); border-radius: 8px; color: var(--muted); font-size: 12px; }
+.set-workspace .set-provisional h3 { margin: 0 0 6px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.set-provisional h3 > span { font-weight: 400; }
+.set-provisional ol { display: grid; gap: 3px; margin: 0; padding: 0; list-style: none; }
+.set-provisional li { display: grid; grid-template-columns: 52px minmax(0,1fr) auto; gap: 8px; align-items: baseline; line-height: 1.45; }
+.set-provisional li > span:nth-child(2) { min-width: 0; overflow-wrap: anywhere; }
+.set-provisional .time { font-variant-numeric: tabular-nums; }
+.set-provisional small { font-size: 11px; }
+
+/* Entries */
+.set-row-order { display: flex; flex-direction: column; align-items: center; align-self: start; }
+.set-tracklist .set-row-order .reorder-handle { margin: 0; align-self: center; }
+.set-workspace .set-move { width: 22px; height: 15px; padding: 0; border: 0; background: transparent; color: var(--muted); opacity: 0; transition: opacity 120ms ease-out; }
+.set-tracklist > li:hover .set-move, .set-tracklist > li:focus-within .set-move { opacity: 1; }
+.set-tracklist > li:hover .set-move:disabled, .set-tracklist > li:focus-within .set-move:disabled { opacity: .3; }
+.set-workspace .set-move:hover:not(:disabled) { color: var(--text); }
+@media (hover: none) { .set-workspace .set-move { opacity: 1; } }
+.set-tracklist .set-time { margin-top: 18px; }
+.set-tracklist .set-artwork { display: grid; place-items: center; color: var(--muted); margin-top: 2px; }
+.set-track-info .download-problem { margin-top: 0; }
+.set-track-info .download-problem > p { color: var(--muted); }
+.set-track-info .set-notice { margin: 2px 0; }
+.set-track-info > .set-source-choice { margin-top: 4px; }
+.set-source-choice > small { text-align: right; font-size: 11px; }
+.set-add-source { display: grid; gap: 6px; margin-top: 6px; padding: 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+.set-add-source button { font-size: 12px; padding: 6px 9px; }
+.set-workspace .set-track-state { display: flex; flex-direction: column; align-items: flex-end; justify-content: flex-start; flex-wrap: nowrap; gap: 8px; min-height: 0; max-width: 250px; padding-top: 3px; }
+.set-state-line, .set-state-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px 10px; }
+.set-workspace .set-status { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.set-workspace .set-status[data-kind=done], .set-workspace .set-status[data-kind=problem] { color: var(--text); }
+.set-workspace .set-status[data-kind=problem] { font-weight: 600; }
+.set-track-state .set-duration { min-width: 0; }
+.set-workspace .set-track-state .set-track-play { width: auto; height: auto; padding: 5px 9px; gap: 5px; color: var(--text); }
+
+@media (max-width: 1100px) {
+  .set-workspace .set-track-state { max-width: 190px; }
+}
+@media (max-width: 760px) {
+  .set-workspace .set-track-state { grid-column: 4; flex-direction: row; flex-wrap: wrap; align-items: center; justify-content: flex-start; max-width: none; padding-top: 0; }
+  .set-state-line, .set-state-actions { justify-content: flex-start; }
+  .set-navigation-open { max-width: 100%; }
+  .set-workspace .set-mode-options label { padding-inline: 10px; }
+}
+@media (prefers-reduced-motion: reduce) { .set-workspace .set-move, .set-access-toggle > svg { transition: none; } }
+
+.set-access-guide { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 12px; line-height: 1.5; color: var(--muted); }
+.set-access-guide li:first-child { color: var(--text); }
+
+.set-report-head > div > small { display: block; line-height: 1.5; }
+
+.set-workspace .set-source-choice .set-source-title { display: flex; justify-content: flex-start; gap: 8px; min-width: 0; padding: 3px 0; border: 0; background: transparent; font-size: 12px; line-height: 1.45; text-align: left; white-space: normal; }
+.set-workspace .set-source-choice .set-source-title > span { overflow-wrap: anywhere; }
+.set-workspace .set-source-choice .use-source { min-height: 32px; width: 100%; font-size: 11px; white-space: nowrap; }
+
+/* While a scan runs the form shrinks to what was entered, so progress and Cancel stay in view. */
+.set-form[data-scanning=true] :is(.set-modes, .set-hint, .set-access, .set-token) { display: none; }
+.set-form[data-scanning=true] textarea { max-height: 64px; }
+
+.set-resume-access { display: grid; justify-items: center; gap: 6px; }
+.set-workspace .set-resume-access label { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; color: var(--text); font-size: 12px; }
+/* Keep Pause scan above the player at the minimum window height: the card becomes a strip with Pause or Resume beside the heading. */
+@media (max-height: 720px) {
+  .set-workspace .set-scan-status { margin-bottom: 10px; padding: 10px 12px; place-items: stretch; }
+  .set-workspace .set-scan-status .scan-progress-detail { margin: 0; }
+  .set-workspace .set-scan-status .scan-progress { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 4px 12px; width: 100%; text-align: left; }
+  .set-scan-status .scan-progress > * { grid-column: 1 / -1; }
+  .set-scan-status .scan-progress > svg { grid-column: 1; grid-row: 1; }
+  .set-scan-status .scan-progress > .scan-progress-heading { grid-column: 2; grid-row: 1; gap: 2px; }
+  .set-workspace .set-scan-status .scan-progress > .scan-progress-action { grid-column: 3; grid-row: 1; margin: 0; }
+  .set-scan-status .scan-progress > progress { width: 100%; }
+  .set-workspace .set-scan-status .set-resume-access { justify-items: start; }
+  .set-workspace .set-scan-status .set-resume-access label { justify-content: flex-start; }
+
+}

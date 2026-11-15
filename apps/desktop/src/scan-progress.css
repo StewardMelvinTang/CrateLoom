@@ -1,0 +1,5 @@
+/* Scan progress card. Loaded after the global sheets. */
+.scan-progress .scan-progress-detail { max-width: 56ch; }
+.scan-progress[data-state=waiting] > svg, .scan-progress[data-state=paused] > svg, .scan-progress[data-state=stalled] > svg { color: var(--muted); }
+.scan-progress button.primary { margin-top: 4px; }
+.scan-progress .scan-progress-countdown { color: var(--text); }

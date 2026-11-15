@@ -1,3 +1,4 @@
+from contextlib import closing
 import json
 import math
 import os
@@ -53,6 +54,7 @@ class AnalysisJobs(unittest.TestCase):
                 self.assertTrue(any(lo>0 or hi<0 for lo,hi in pairs))  # actual signed oscillations
                 self.assertTrue(all(lo<=hi for lo,hi in pairs))
                 self.assertIsNone(data['sections']); self.assertIsNone(data['downbeats'])
+                self.assertIn('key', data); self.assertEqual(t['detail_analysis']['key'], data['key'] and {k: data['key'][k] for k in ('camelot','name','short','strength')})
                 anchor=round(data['beats'][0]*1000000)
                 grid=call('grid.set',{'id':t['id'],'anchor_us':anchor}); self.assertEqual(grid['grid_anchor_us'],anchor)
                 shifted=call('grid.offset',{'id':t['id'],'offset_us':10000}); self.assertEqual(shifted['grid_offset_us'],10000)
@@ -79,9 +81,9 @@ class AnalysisJobs(unittest.TestCase):
                 self.assertEqual((restored['grid_bpm'],restored['grid_offset_us']),(130,10000))
                 # Replacing an older analyzer cache of the same stream preserves a fixed grid.
                 import sqlite3
-                with sqlite3.connect(root/'data'/'library.sqlite3') as db:
+                with closing(sqlite3.connect(root/'data'/'library.sqlite3')) as db:
                     detail=json.loads(db.execute('SELECT detail_analysis FROM tracks WHERE id=?',(t['id'],)).fetchone()[0]); detail['cache_key']='old-version-key'
-                    db.execute('UPDATE tracks SET detail_analysis=?,fixed_grid_key=?,grid_cache_key=?,offset_cache_key=? WHERE id=?',(json.dumps(detail),'old-version-key','old-version-key','old-version-key',t['id']))
+                    db.execute('UPDATE tracks SET detail_analysis=?,fixed_grid_key=?,grid_cache_key=?,offset_cache_key=? WHERE id=?',(json.dumps(detail),'old-version-key','old-version-key','old-version-key',t['id'])); db.commit()
                 upgraded=call('analysis.enqueue',{'id':t['id']})
                 self.assertEqual(upgraded['state'],'succeeded')
                 preserved=call('track.get',{'id':t['id']})
@@ -123,3 +125,53 @@ class AnalysisJobs(unittest.TestCase):
 
             finally:
                 p.stdin.close(); p.wait(timeout=10); p.stdout.close(); p.stderr.close()
+
+
+@unittest.skipUnless(ANALYZER and Path(ANALYZER).is_file(), 'Set CRATELOOM_ANALYSIS_PYTHON to the pinned environment')
+class SteadyGrid(unittest.TestCase):
+    def fit(self, body):
+        script = '''
+import json, sys
+import numpy as np
+from crateloom.analysis_worker import steady_grid
+rng = np.random.default_rng(7)
+frame = 256 / 22050
+def envelope(times, duration):
+    env = np.zeros(int(duration / frame) + 1)
+    for t in times:
+        i = int(round(t / frame))
+        if i < len(env): env[i] = 1; env[max(0, i - 1)] = max(env[max(0, i - 1)], .4); env[min(len(env) - 1, i + 1)] = max(env[min(len(env) - 1, i + 1)], .4)
+    return env
+''' + body
+        env = {**os.environ, 'PYTHONPATH': str(Path(__file__).resolve().parents[1])}
+        return json.loads(subprocess.run([ANALYZER, '-c', script], check=True, capture_output=True, text=True, env=env).stdout)
+
+    def test_steady_track_gets_a_precise_tempo_despite_a_coarse_tracker(self):
+        result = self.fit('''
+duration, bpm, first = 240.0, 127.0, 1.9
+true = first + np.arange(int((duration - first) * bpm / 60)) * 60 / bpm
+tracked = true + rng.normal(0, .006, len(true))
+tracked = np.delete(tracked, [40, 41, 200])          # skipped beats
+tracked[300:] += 60 / bpm / 2                         # the tracker slips half a beat late on
+print(json.dumps(steady_grid(np, np.sort(tracked), envelope(true, duration), frame, duration)))
+''')
+        self.assertTrue(result['stable'], result)
+        self.assertEqual(result['bpm'], 127.0)
+        self.assertLess(abs(result['origin'] - 1.9), .015)
+
+    def test_fractional_tempo_is_kept_and_drifting_tempo_is_not_called_steady(self):
+        result = self.fit('''
+duration, bpm = 200.0, 93.47
+true = .4 + np.arange(int((duration - .4) * bpm / 60)) * 60 / bpm
+print(json.dumps(steady_grid(np, true + rng.normal(0, .004, len(true)), envelope(true, duration), frame, duration)))
+''')
+        self.assertTrue(result['stable'], result)
+        self.assertLess(abs(result['bpm'] - 93.47), .02)
+        result = self.fit('''
+duration = 200.0
+steps = 60 / np.linspace(96, 118, 340)                 # a live drummer speeding up
+true = .5 + np.concatenate(([0], np.cumsum(steps)))
+true = true[true < duration]
+print(json.dumps(steady_grid(np, true, envelope(true, duration), frame, duration)))
+''')
+        self.assertFalse(result['stable'], result)

@@ -1,3 +1,4 @@
+from contextlib import closing
 import json
 import os
 from pathlib import Path
@@ -61,6 +62,20 @@ class Flow(unittest.TestCase):
                 p.wait(timeout=10)
                 p.stdout.close()
                 p.stderr.close()
+
+    def test_unencodable_reply_does_not_stop_the_request_loop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, 'CRATELOOM_DATA': str(Path(tmp) / 'data'),
+                   'PYTHONPATH': str(Path(__file__).resolve().parents[1])}
+            # A lone surrogate is valid JSON input but cannot be written as UTF-8.
+            lines = ['{"protocol_version":1,"request_id":"\\ud800","method":"handshake","params":{}}',
+                     '{"protocol_version":1,"request_id":"next","method":"handshake","params":{}}']
+            done = subprocess.run([sys.executable, '-m', 'crateloom'], input='\n'.join(lines) + '\n',
+                                  text=True, capture_output=True, env=env, timeout=30)
+            replies = [json.loads(line) for line in done.stdout.splitlines()]
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual([reply['request_id'] for reply in replies], ['\ud800', 'next'])
+            self.assertEqual(replies[1]['result']['version'], '0.1.0')
 
     def test_changed_audio_cannot_reuse_cues_or_export(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,9 +150,9 @@ class Flow(unittest.TestCase):
             self.assertEqual(response['result']['cues'],[{'slot':0,'position_us':250000,'label':'Existing'}])
             self.assertEqual(response['result']['sections'],[])
             self.assertIsNotNone(response['result']['audio_hash'])
-            with sqlite3.connect(data/'library.sqlite3') as verify:
-                self.assertEqual(verify.execute('PRAGMA user_version').fetchone()[0],8)
-            backups=list(data.glob('library-before-v8-*.sqlite3')); self.assertEqual(len(backups),1)
-            with sqlite3.connect(backups[0]) as backup:
+            with closing(sqlite3.connect(data/'library.sqlite3')) as verify:
+                self.assertEqual(verify.execute('PRAGMA user_version').fetchone()[0],11)
+            backups=list(data.glob('library-before-v11-*.sqlite3')); self.assertEqual(len(backups),1)
+            with closing(sqlite3.connect(backups[0])) as backup:
                 self.assertEqual(backup.execute('PRAGMA user_version').fetchone()[0],2)
                 self.assertEqual(backup.execute('SELECT label FROM cues').fetchone()[0],'Existing')

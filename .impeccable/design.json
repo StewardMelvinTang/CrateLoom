@@ -1,0 +1,430 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-12T06:54:31Z",
+  "title": "Design System: CrateLoom",
+  "extensions": {
+    "colorMeta": {
+      "light-bg": {
+        "role": "neutral",
+        "displayName": "Light Bg",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "light-sidebar": {
+        "role": "neutral",
+        "displayName": "Light Sidebar",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "light-surface": {
+        "role": "neutral",
+        "displayName": "Light Surface",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "light-text": {
+        "role": "primary",
+        "displayName": "Light Text",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "light-muted": {
+        "role": "neutral",
+        "displayName": "Light Muted",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "light-line": {
+        "role": "neutral",
+        "displayName": "Light Line",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "light-selection": {
+        "role": "neutral",
+        "displayName": "Light Selection",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "light-control-line": {
+        "role": "neutral",
+        "displayName": "Light Control Line",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "light-recommended": {
+        "role": "secondary",
+        "displayName": "Light Recommended",
+        "tonalRamp": [
+          "oklch(20% 0.025 151)",
+          "oklch(30% 0.045 151)",
+          "oklch(40% 0.065 151)",
+          "oklch(50% 0.08 151)",
+          "oklch(62% 0.08 151)",
+          "oklch(74% 0.065 151)",
+          "oklch(86% 0.04 151)",
+          "oklch(95% 0.015 151)"
+        ]
+      },
+      "dark-bg": {
+        "role": "neutral",
+        "displayName": "Dark Bg",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "dark-sidebar": {
+        "role": "neutral",
+        "displayName": "Dark Sidebar",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "dark-surface": {
+        "role": "neutral",
+        "displayName": "Dark Surface",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "dark-text": {
+        "role": "primary",
+        "displayName": "Dark Text",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "dark-muted": {
+        "role": "neutral",
+        "displayName": "Dark Muted",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "dark-line": {
+        "role": "neutral",
+        "displayName": "Dark Line",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "dark-selection": {
+        "role": "neutral",
+        "displayName": "Dark Selection",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "dark-control-line": {
+        "role": "neutral",
+        "displayName": "Dark Control Line",
+        "tonalRamp": [
+          "#181818",
+          "#262626",
+          "#363636",
+          "#5e5e5e",
+          "#949494",
+          "#d4d4d4",
+          "#ebebeb",
+          "#f4f4f4"
+        ]
+      },
+      "dark-recommended": {
+        "role": "secondary",
+        "displayName": "Dark Recommended",
+        "tonalRamp": [
+          "oklch(20% 0.025 151)",
+          "oklch(30% 0.045 151)",
+          "oklch(40% 0.065 151)",
+          "oklch(50% 0.08 151)",
+          "oklch(62% 0.08 151)",
+          "oklch(74% 0.065 151)",
+          "oklch(86% 0.04 151)",
+          "oklch(95% 0.015 151)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Workspace Title",
+        "purpose": "Compact workspace headings; no display face."
+      },
+      "section": {
+        "displayName": "Section Heading",
+        "purpose": "Section and dialog headings."
+      },
+      "body": {
+        "displayName": "Body and Track",
+        "purpose": "Track information and default controls."
+      },
+      "label": {
+        "displayName": "Supporting Label",
+        "purpose": "Concise metadata and secondary controls."
+      }
+    },
+    "shadows": [
+      {
+        "name": "floating-status",
+        "value": "0 4px 18px var(--shadow)",
+        "purpose": "Floating status over the workspace."
+      },
+      {
+        "name": "dialog",
+        "value": "0 10px 45px var(--shadow)",
+        "purpose": "Section editor dialog."
+      },
+      {
+        "name": "overlay-sidebar",
+        "value": "8px 0 24px var(--shadow)",
+        "purpose": "Expanded sidebar in the narrow layout."
+      }
+    ],
+    "motion": [
+      {
+        "name": "disclosure-expand",
+        "value": "240ms cubic-bezier(.16,1,.3,1)",
+        "purpose": "Shared disclosure content expansion."
+      },
+      {
+        "name": "disclosure-fade",
+        "value": "180ms ease-out",
+        "purpose": "Shared disclosure content opacity."
+      },
+      {
+        "name": "disclosure-chevron",
+        "value": "220ms cubic-bezier(.16,1,.3,1)",
+        "purpose": "Chevron rotation."
+      },
+      {
+        "name": "sidebar-width",
+        "value": "220ms cubic-bezier(.16,1,.3,1)",
+        "purpose": "Sidebar collapse and expansion; disabled while dragging."
+      },
+      {
+        "name": "control-state",
+        "value": "140ms ease-out",
+        "purpose": "Button background and border changes."
+      },
+      {
+        "name": "reduced-motion",
+        "value": ".01ms",
+        "purpose": "Transition and animation duration when reduced motion is requested; animations run once."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "compact",
+        "value": "1100px"
+      },
+      {
+        "name": "condensed-library",
+        "value": "850px"
+      },
+      {
+        "name": "narrow",
+        "value": "760px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Action",
+      "kind": "button",
+      "refersTo": "button-primary-light",
+      "description": "Neutral inverse action; theme variables select the matching light or dark colors.",
+      "html": "<button class=\"ds-primary\">Add music</button>",
+      "css": ".ds-primary{font:14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--line,#d4d4d4);border-radius:7px;padding:8px 12px;cursor:pointer;transition:background-color 140ms ease-out,border-color 140ms ease-out;background:var(--accent,#111);color:var(--bg,#f4f4f4);border-color:var(--accent,#111);font-weight:650}.ds-primary:hover:not(:disabled){opacity:.85}.ds-primary:focus-visible{outline:2px solid var(--accent,#111);outline-offset:3px;}.ds-primary:disabled{opacity:.48;cursor:not-allowed}"
+    },
+    {
+      "name": "Secondary Action",
+      "kind": "button",
+      "refersTo": "button-secondary-light",
+      "description": "Compact neutral outlined action.",
+      "html": "<button class=\"ds-secondary\">Use source</button>",
+      "css": ".ds-secondary{font:14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--line,#d4d4d4);border-radius:7px;padding:8px 12px;cursor:pointer;transition:background-color 140ms ease-out,border-color 140ms ease-out;background:var(--surface,#fff);color:var(--text,#111)}.ds-secondary:hover:not(:disabled){border-color:var(--accent,#111)}.ds-secondary:focus-visible{outline:2px solid var(--accent,#111);outline-offset:3px;}.ds-secondary:disabled{opacity:.48;cursor:not-allowed}"
+    },
+    {
+      "name": "Search Field",
+      "kind": "input",
+      "refersTo": "field",
+      "description": "Neutral search field with readable placeholder and visible keyboard focus.",
+      "html": "<input class=\"ds-field\" aria-label=\"Search tracks\" placeholder=\"Search tracks\">",
+      "css": ".ds-field{font:14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;color:var(--text,#111);background:var(--surface,#fff);border:1px solid var(--control-line,#949494);border-radius:6px;padding:7px;caret-color:var(--text,#111)}.ds-field::placeholder{color:var(--muted,#5e5e5e);opacity:1}.ds-field:focus-visible{outline:2px solid var(--accent,#111);outline-offset:3px;}"
+    },
+    {
+      "name": "Sidebar Navigation",
+      "kind": "nav",
+      "description": "Active navigation uses inverse neutral tones; count stays secondary until selected.",
+      "html": "<nav class=\"ds-sidebar\" aria-label=\"Library\"><button class=\"ds-nav\" aria-current=\"page\"><svg width=\"17\" height=\"17\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"M3 7V5a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v2M3 7h18l-2 12H5L3 7Z\"/></svg>All Tracks<span>12</span></button></nav>",
+      "css": ".ds-sidebar{width:196px;padding:8px 10px;background:var(--side,#ebebeb)}.ds-nav{font:14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--line,#d4d4d4);border-radius:7px;padding:8px 12px;cursor:pointer;transition:background-color 140ms ease-out,border-color 140ms ease-out;width:100%;justify-content:flex-start;padding:9px 10px;border:0;background:transparent;color:var(--text,#111)}.ds-nav[aria-current=page]{background:var(--text,#111);color:var(--bg,#f4f4f4)}.ds-nav span{margin-left:auto;font-size:12px}.ds-nav:hover{border-color:var(--text,#111)}.ds-nav:focus-visible{outline:2px solid var(--accent,#111);outline-offset:3px;}"
+    },
+    {
+      "name": "Hot Cue Card",
+      "kind": "card",
+      "description": "Musical cue color is data encoding within the neutral workspace.",
+      "html": "<div class=\"ds-cue\"><button class=\"ds-cue-trigger\"><span class=\"ds-cue-slot\">A</span><span>Intro<small>0:16</small></span></button></div>",
+      "css": ".ds-cue{width:230px;border:1px solid var(--line,#d4d4d4);border-radius:6px;background:var(--surface,#fff)}.ds-cue-trigger{font:14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--line,#d4d4d4);border-radius:7px;padding:8px 12px;cursor:pointer;transition:background-color 140ms ease-out,border-color 140ms ease-out;border:0;background:transparent;color:var(--text,#111);width:100%;min-height:60px;justify-content:flex-start;text-align:left;white-space:normal}.ds-cue-slot{display:grid;place-items:center;width:32px;height:32px;border-radius:6px;background:#ef5c86;color:#16201d;font-weight:700}.ds-cue-trigger small{display:block;color:var(--muted,#5e5e5e);margin-top:4px;font-variant-numeric:tabular-nums}.ds-cue-trigger:focus-visible{outline:2px solid var(--accent,#111);outline-offset:3px;}"
+    },
+    {
+      "name": "Recommended Source",
+      "kind": "custom",
+      "refersTo": "source-option",
+      "description": "Stable duration and action columns; green outline has an accompanying written reason.",
+      "html": "<div class=\"ds-source\"><button class=\"ds-source-title\"><span>Original mix<small>Recommended - duration match</small></span></button><span class=\"ds-source-time\">4:12</span><button class=\"ds-use-source\">Use source</button></div>",
+      "css": ".ds-source{display:grid;grid-template-columns:minmax(0,1fr) 42px 100px;gap:12px;align-items:center;padding:7px 9px;border:1px solid var(--recommended,#43835a);border-radius:7px;color:var(--text,#111);font:14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif}.ds-source-title{border:0;background:transparent;min-width:0;padding:3px 0;text-align:left;white-space:normal;line-height:1.45;color:inherit;font:inherit;cursor:pointer}.ds-source-title small{display:block;font-size:10px;color:var(--muted,#5e5e5e);margin-top:3px}.ds-source-time{font-size:12px;text-align:right;font-variant-numeric:tabular-nums;color:var(--muted,#5e5e5e)}.ds-use-source{font:14px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid var(--line,#d4d4d4);border-radius:7px;padding:8px 12px;cursor:pointer;transition:background-color 140ms ease-out,border-color 140ms ease-out;min-height:32px;font-size:11px;background:var(--surface,#fff);color:var(--text,#111)}.ds-source-title:focus-visible,.ds-use-source:focus-visible{outline:2px solid var(--accent,#111);outline-offset:3px;}.ds-use-source:hover{border-color:var(--text,#111)}"
+    },
+    {
+      "name": "Disclosure",
+      "kind": "custom",
+      "description": "Compact chevron disclosure; application content expansion shares the recorded motion tokens.",
+      "html": "<details class=\"ds-disclosure\"><summary><svg width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" aria-hidden=\"true\"><path d=\"m9 18 6-6-6-6\"/></svg>Review sources</summary><div class=\"ds-disclosure-body\">Source title, duration and action</div></details>",
+      "css": ".ds-disclosure{font:12px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;color:var(--muted,#5e5e5e)}.ds-disclosure summary{display:flex;align-items:center;gap:5px;padding:5px 0;cursor:pointer;list-style:none}.ds-disclosure summary::-webkit-details-marker{display:none}.ds-disclosure svg{transition:transform 220ms cubic-bezier(.16,1,.3,1)}.ds-disclosure[open] svg{transform:rotate(90deg)}.ds-disclosure summary:focus-visible{outline:2px solid var(--accent,#111);outline-offset:3px;}.ds-disclosure-body{padding:6px 3px 8px 0;color:var(--text,#111)}@media(prefers-reduced-motion:reduce){.ds-disclosure svg{transition-duration:.01ms}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "Quiet, compact desktop workspace",
+    "overview": "CrateLoom uses the supplied original monochrome brand assets in a compact workspace for preparing local music. System typography, thin dividers and neutral tonal layers keep track information, source provenance and editable cue positions prominent. The light and dark themes have separate palettes.\n\nThe interface supports the local, offline work and human review required by `PRODUCT.md`. Status includes text, controls show keyboard focus, and errors should suggest a next action. Native window controls belong to the operating system.\n\nVisual evidence in `.impeccable/review/` comes from browser fixtures; native window behavior remains unverified.",
+    "keyCharacteristics": [
+      "Monochrome application chrome with deliberate musical data colors.",
+      "Compact rows, stable columns and concise action labels.",
+      "Native controls, visible focus and reviewable analysis."
+    ],
+    "rules": [
+      {
+        "name": "The Data Color Rule",
+        "body": "Keep application chrome monochrome. Preserve waveform RGB, hot-cue and musical-section colors because they encode musical information. Source recommendations use a restrained green outline together with a written recommendation and reason.",
+        "section": "colors"
+      },
+      {
+        "name": "The Track First Rule",
+        "body": "Keep track names and editable cue positions more prominent than auxiliary metadata. Use short, direct labels and sentence case for actions.",
+        "section": "typography"
+      }
+    ],
+    "dos": [
+      "Do use the supplied original CrateLoom mark and application icon.",
+      "Do preserve compact native conventions, readable themes and visible keyboard focus.",
+      "Do show status text, useful errors and source provenance beside the affected work.",
+      "Do keep musical data colors distinct from monochrome interface chrome."
+    ],
+    "donts": [
+      "Don't reintroduce teal as an interface accent or add a sidebar wordmark.",
+      "Don't replace native window controls with simulated traffic lights.",
+      "Don't communicate recommendation, progress or errors through color alone.",
+      "Don't present fast section estimates as proprietary semantic analysis or imply an export was imported into rekordbox."
+    ]
+  }
+}

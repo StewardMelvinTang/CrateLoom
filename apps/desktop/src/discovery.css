@@ -1,0 +1,42 @@
+/* Find Music. Loaded after the global sheets, so equal-specificity rules here win. */
+.discovery-search .discovery-help { margin: 8px 0 0; }
+.discovery-workspace .discovery-message { display: flex; align-items: center; gap: 8px; }
+.discovery-notice { display: flex; align-items: flex-start; gap: 8px; max-width: 900px; margin: 12px 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--text); font-size: 12px; line-height: 1.5; }
+.discovery-notice[data-tone=error] { border-color: var(--control-line); }
+.discovery-notice > svg { flex: none; margin-top: 2px; }
+.discovery-notice > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.discovery-notice > button { flex: none; padding: 4px 8px; font-size: 12px; }
+.discovery-workspace .discovery-notice-dismiss { padding: 3px; border-color: transparent; background: transparent; color: var(--muted); }
+.discovery-workspace .discovery-notice-dismiss:hover { color: var(--text); border-color: var(--line); }
+
+.discovery-results { margin-top: 20px; }
+.discovery-results-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.discovery-results-head button, .discovery-review-heading button { font-size: 12px; padding: 6px 9px; }
+.discovery-results .discovery-help { margin: 6px 0 0; }
+.discovery-results .discovery-references { margin: 12px 0 0; max-height: 260px; }
+.discovery-reference-source strong { font-weight: 600; }
+.discovery-reference-source small { line-height: 1.5; }
+.discovery-workspace .discovery-source-url { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.discovery-review > .discovery-help { margin: 0 0 4px; }
+.direct-url-form button { font-size: 12px; }
+
+.download-group { margin-top: 6px; }
+.download-group h3 { display: flex; align-items: center; gap: 6px; margin: 14px 0 0; padding-bottom: 6px; border-bottom: 1px solid var(--line); font-size: 12px; font-weight: 600; color: var(--muted); }
+.download-row-head button { flex: none; gap: 5px; }
+.download-row .download-problem { margin-top: 8px; }
+.download-row .discovery-notice { margin: 8px 0 0; }
+.discovery-workspace .download-provenance .disclosure-toggle, .discovery-workspace .provider-capabilities .disclosure-toggle { font-size: 11px; }
+.provider-capabilities dl > div { grid-template-columns: minmax(110px, 190px) minmax(0, 1fr); gap: 12px; }
+@media (max-width: 760px) {
+  .discovery-workspace { padding-inline: 14px; }
+  .discovery-review-body { flex-wrap: wrap; }
+  .discovery-search > div, .direct-url-form > div { flex-wrap: wrap; }
+  .discovery-search > div > svg, .direct-url-form > div > svg { display: none; }
+  .discovery-search input, .direct-url-form input { flex: 1 1 200px; }
+  .download-provenance label { grid-template-columns: 1fr; gap: 4px; }
+}
+
+.discovery-workspace .download-problem-text { margin: 8px 0 0; font-size: 12px; line-height: 1.5; color: var(--text); overflow-wrap: anywhere; }
+
+.download-group h3 > span { flex: 1; }
+.download-group h3 > button { flex: none; padding: 4px 8px; font-size: 11px; font-weight: 400; color: var(--text); }

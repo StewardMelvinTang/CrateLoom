@@ -9,8 +9,35 @@ import time
 import unittest
 import wave
 import array
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from crateloom import structure_worker
 
 PYTHON = os.environ.get('CRATELOOM_STRUCTURE_PYTHON')
+
+
+class StructureWindows(unittest.TestCase):
+    def test_long_sections_use_track_time_and_join_at_window_boundary(self):
+        result = SimpleNamespace(segments=[
+            SimpleNamespace(start=0,end=15,label='intro'),
+            SimpleNamespace(start=15,end=200,label='inst'),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            work=Path(tmp)
+            session=SimpleNamespace(infer=lambda *args,**kwargs:result)
+            def make_clip(args,**kwargs):
+                Path(args[-1]).touch()
+            with patch.object(structure_worker.subprocess,'run',side_effect=make_clip) as ffmpeg:
+                sections=structure_worker.analyze_sections(session,'long.wav',work,work/'status.json',306)
+            self.assertEqual(ffmpeg.call_count,2)
+            self.assertEqual(sections,[
+                {'start_us':0,'end_us':15000000,'label':'Intro'},
+                {'start_us':15000000,'end_us':153000000,'label':'Instrumental'},
+                {'start_us':153000000,'end_us':156000000,'label':'Intro'},
+                {'start_us':156000000,'end_us':306000000,'label':'Instrumental'},
+            ])
+
 
 @unittest.skipUnless(PYTHON and Path(PYTHON).is_file(), 'Set CRATELOOM_STRUCTURE_PYTHON to the optional model environment')
 class StructureJobs(unittest.TestCase):
@@ -34,7 +61,8 @@ class StructureJobs(unittest.TestCase):
                 section={'id':'manual','start_us':0,'end_us':2000000,'label':'Intro'}
                 call('cues.save',{'id':track['id'],'cues':[cue]})
                 call('sections.save',{'id':track['id'],'sections':[section]})
-                job=call('structure.enqueue',{'id':track['id']}); self.assertEqual(job['kind'],'structure')
+                job=call('structure.enqueue',{'id':track['id'],'automatic':True}); self.assertEqual(job['kind'],'structure')
+                self.assertEqual(call('structure.enqueue',{'id':track['id'],'automatic':True})['id'],job['id'])
                 cue={'slot':0,'position_us':750000,'label':'Edited while analyzing'}
                 call('cues.save',{'id':track['id'],'cues':[cue]})
                 deadline=time.monotonic()+180
@@ -46,6 +74,7 @@ class StructureJobs(unittest.TestCase):
                 result=call('track.get',{'id':track['id']})
                 self.assertEqual(result['cues'],[cue]); self.assertIn(section,result['sections'])
                 self.assertEqual(result['structure_analysis']['weight_license'],'CC-BY-NC-SA-4.0')
+                self.assertIsNone(call('structure.enqueue',{'id':track['id'],'automatic':True}))
                 self.assertTrue(result['structure_analysis']['suggestions'])
                 automatic=[x for x in result['sections'] if x.get('origin')=='model']
                 self.assertTrue(automatic); self.assertTrue(all(x['start_us']>=section['end_us'] for x in automatic))

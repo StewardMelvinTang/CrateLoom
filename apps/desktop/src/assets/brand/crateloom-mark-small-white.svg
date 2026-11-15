@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="title">
+  <title id="title">CrateLoom mark (small sizes)</title>
+  <path fill="#FFFFFF" fill-rule="evenodd" d="M49.62 128A88 88 0 1 1 206.38 128ZM104 88A24 24 0 1 0 152 88A24 24 0 1 0 104 88Z"/>
+  <path fill="#FFFFFF" fill-rule="evenodd" d="M32 160H224A32 32 0 0 1 256 192V224A32 32 0 0 1 224 256H32A32 32 0 0 1 0 224V192A32 32 0 0 1 32 160ZM112 192H144A16 16 0 0 1 160 208V208A16 16 0 0 1 144 224H112A16 16 0 0 1 96 208V208A16 16 0 0 1 112 192Z"/>
+</svg>
