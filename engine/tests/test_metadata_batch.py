@@ -113,6 +113,26 @@ class MetadataBatch(unittest.TestCase):
         self.assertEqual(api.dispatch('track.get',{'id':track['id']})['metadata'],before)
         self.assertIn('cover',api.dispatch('metadata.get',{'id':track['id']})['automatic_review']['reason'])
 
+    def test_reversed_title_and_artist_are_put_back_by_a_catalog_match(self):
+        # A "Song - Artist" playlist imported as artist "2 . Ain't No Way", title "Chris Brown".
+        reversed_track = self.track(0)
+        api.dispatch('metadata.save', {'id': reversed_track['id'], 'values': {'title': 'Chris Brown', 'artist': "2 . Ain't No Way"}})
+        unmatched = self.track(1)
+        found = candidate("Ain't No Way")
+        found['values']['artist'] = 'Chris Brown'
+        searched = []
+        def search(engine, request, identity, duration, *args):
+            searched.append((identity['title'], identity['artist']))
+            return {'candidates': [found] if identity == {'title': "Ain't No Way", 'artist': 'Chris Brown', 'version': ''} else []}
+        with patch.object(metadata_lookup, 'search', side_effect=search), patch.object(preparation, 'fetch_cover', return_value=str(self.cover)):
+            batch = self.finish(self.start([reversed_track, unmatched]))
+        self.assertEqual((batch['applied'], batch['needs_review']), (1, 1), batch)
+        self.assertEqual(sorted(searched), sorted([('Chris Brown', "Ain't No Way"), ("Ain't No Way", 'Chris Brown'),
+                                                   ('Song 1', 'Artist'), ('Artist', 'Song 1')]))
+        updated = api.dispatch('track.get', {'id': reversed_track['id']})
+        self.assertEqual((updated['title'], updated['artist']), ("Ain't No Way", 'Chris Brown'))
+        # Nothing matched either way: the track is left as it was, for review.
+        self.assertEqual(api.dispatch('track.get', {'id': unmatched['id']})['title'], 'Song 1')
     def test_unknown_artist_and_weak_similarity_stay_for_review(self):
         tracks = [self.track(0,artist=''),self.track(1)]
         weak = candidate(rank=97)
@@ -271,7 +291,8 @@ class MetadataBatch(unittest.TestCase):
             return {'track': None, 'backup': '/backups/' + track_id, 'written': True, 'artwork_embedded': True}
         self.mocked_writes(write)
         def search(engine, request, identity, *args, **kwargs):
-            return {'candidates': [] if identity['title'] == 'Song 3' else [candidate(identity['title'] + ' (catalog)')]}
+            # Song 3 is in no catalog, in either order of title and artist.
+            return {'candidates': [] if 'Song 3' in (identity['title'], identity['artist']) else [candidate(identity['title'] + ' (catalog)')]}
         def fetch(engine, source, url):
             if source['values']['title'].startswith('Song 2'):
                 raise ValueError('No cover')

@@ -7,6 +7,7 @@ import urllib.parse
 import urllib.request
 
 from . import download_http, service_links, youtube_audio, set_scan_jobs
+from . import metadata_matching
 from .metadata_matching import clean_name, search_identity
 
 MAX_ENTRIES = 1000
@@ -117,7 +118,11 @@ def extractor(api, provider, url):
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise ValueError(f'{provider} could not read this playlist. Check that the link is public.') from error
     tracks = []
-    for row in data.get('entries') or []:
+    rows = data.get('entries') or []
+    owner = lambda row: service_links.clean(row.get('artist') or row.get('channel') or row.get('uploader')) if row else ''
+    reversed_names = metadata_matching.title_first([clean_name(service_links.clean(row.get('title'))) if row else '' for row in rows],
+                                                   [owner(row) for row in rows])
+    for row in rows:
         set_scan_jobs.check()
         if not row:
             tracks.append(entry(None, None, provider))
@@ -136,10 +141,12 @@ def extractor(api, provider, url):
         title = clean_name(service_links.clean(row.get('title')))
         artist = service_links.clean(row.get('artist') or row.get('channel') or row.get('uploader'))
         artist = re.sub(r'\s+-\s+Topic$', '', artist, flags=re.I)
-        identity = search_identity(title)
-        if identity['artist']:
-            artist = identity['artist']
-            title = re.split(r'\s+[-–—]\s+', title, maxsplit=1)[1]
+        parts = re.split(r'\s+[-–—]\s+', title, maxsplit=1)
+        if len(parts) == 2 and reversed_names:
+            # "Song - Artist": this playlist names its songs first.
+            title, artist = parts
+        elif search_identity(title)['artist']:
+            artist, title = parts
         tracks.append(entry(title, artist, provider, page, row.get('duration'), row.get('thumbnail')))
         remember(service_links.clean(data.get('title')) or provider+' playlist',tracks)
         set_scan_jobs.progress('Reading playlist entries',completed=len(tracks),total=len(data.get('entries') or []),unit='entries')

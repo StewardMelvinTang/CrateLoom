@@ -1,10 +1,10 @@
-import {useEffect, useRef, useState, type ReactNode} from 'react';
+import {Fragment, useEffect, useRef, useState, type ReactNode} from 'react';
 import {convertFileSrc} from '@tauri-apps/api/core';
 import {open} from '@tauri-apps/plugin-dialog';
 import {call, message as errorText} from './engine';
 import {useDialogFocus} from './useDialogFocus';
 import {Menu} from './Menu';
-import {X, Search, ImagePlus, Pencil, Trash2, Disc3, ChevronLeft, ChevronRight, Check, AlertTriangle, Info} from 'lucide-react';
+import {X, Search, ImagePlus, Pencil, Trash2, Disc3, ChevronLeft, ChevronRight, Check, AlertTriangle, Info, ArrowUpDown} from 'lucide-react';
 import './metadata.css';
 
 export type MetadataState={revision?:string;artwork_supported?:boolean;values:Record<string,string>;pending:Record<string,string>;artwork_path:string|null;artwork_pending:boolean;source:{provider:string;recording_id:string;release_id?:string}|null;automatic?:{rank:number;match_status:string;reviewed:boolean};automatic_review?:{state:string;reason?:string|null;query?:{title:string;artist:string;version:string};candidates:Candidate[];warnings:string[]}|null};
@@ -142,7 +142,7 @@ export function MetadataEditor({ids,onTrackOpen,onClose,onSaved}:{ids:string[];o
        {findingCover && <span className="metadata-cover-busy" role="status">Finding release cover…</span>}
        {state.artwork_supported===false && <small>This file format cannot hold a cover. It stays in the CrateLoom library only.</small>}
       </div>
-      <div className="metadata-fields">{FIELDS.map(key=><label key={key}>
+      <div className="metadata-fields">{FIELDS.map(key=><Fragment key={key}><label>
        {FIELD_LABELS[key]}
        <input id={`metadata-${key}`} aria-label={`Metadata ${key}`} maxLength={500} value={state.values[key] || ''} disabled={working}
         {...(key==='date'?{placeholder:'YYYY, YYYY-MM or YYYY-MM-DD','aria-invalid':dateInvalid || !!dateError,'aria-describedby':'metadata-date-help'}:{})} onChange={e=>{
@@ -151,7 +151,12 @@ export function MetadataEditor({ids,onTrackOpen,onClose,onSaved}:{ids:string[];o
         if(['title','artist'].includes(key)){setMatches([]);setLookupQuery(null);setTask(null);setMessage('');}
        }}/>
        {key==='date' && (dateError || dateInvalid) && <small id="metadata-date-help" className="metadata-field-error" role={dateError?'alert':undefined}><AlertTriangle size={12} aria-hidden="true"/> {dateError?`${dateError.replace(/\.$/,'')}.`:DATE_HINT}</small>}
-      </label>)}</div>
+      </label>
+      {/* Playlists written "Song - Artist" can arrive with the two reversed. */}
+      {key==='title' && <button type="button" className="metadata-swap" disabled={working || !(state.values.title || state.values.artist)} title="Put the title in the artist field and the artist in the title field"
+       onClick={()=>{setState({...state,values:{...state.values,title:state.values.artist || '',artist:state.values.title || ''},source:null});setMatches([]);setLookupQuery(null);setTask(null);setMessage('');}}>
+       <ArrowUpDown size={13} aria-hidden="true"/> Swap title and artist</button>}
+      </Fragment>)}</div>
      </div>
     </div>
     <div className="metadata-sources">

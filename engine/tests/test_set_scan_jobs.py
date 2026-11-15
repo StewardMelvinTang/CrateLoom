@@ -169,6 +169,23 @@ time.sleep(60)
         self.assertEqual(result['state'],'cancelled')
         self.assertEqual(result['result']['tracks'][0]['title'],'First')
 
+    def test_playlist_written_song_first_is_read_with_artists_in_place(self):
+        def listing(titles,channel='Playlist Uploader'):
+            rows=[{'id':f'abcdefghij{i}','title':title,'channel':channel,'duration':200} for i,title in enumerate(titles)]
+            return SimpleNamespace(stdout=json.dumps({'title':'Throwbacks','entries':rows}))
+        def read(titles,**kwargs):
+            with patch.object(youtube_audio,'executable',return_value='/tools/yt-dlp'),patch.object(youtube_audio,'run_helper',return_value=listing(titles,**kwargs)):
+                return [(t['title'],t['artist']) for t in playlist_sources.extractor(api,'YouTube','https://www.youtube.com/playlist?list=PL1')[1]]
+        song_first=["2 . Ain't No Way - Chris Brown",'5. Power Trip - J. Cole ft Miguel','7. Baby Boy(NIE Remix) - Beyonce feat. Sean Paul','10. Simple Things - Usher']
+        self.assertEqual(read(song_first),[("Ain't No Way",'Chris Brown'),('Power Trip','J. Cole ft Miguel'),
+                                           ('Baby Boy(NIE Remix)','Beyonce feat. Sean Paul'),('Simple Things','Usher')])
+        # The usual order, and lists with no evidence either way, stay "Artist - Song".
+        self.assertEqual(read(['01. Chris Brown - Ain\'t No Way','J. Cole ft Miguel - Power Trip']),[("Ain't No Way",'Chris Brown'),('Power Trip','J. Cole ft Miguel')])
+        self.assertEqual(read(['Usher - Simple Things','Mario - Let Me Love You']),[('Simple Things','Usher'),('Let Me Love You','Mario')])
+        # An artist channel names the artist side.
+        self.assertEqual(read(['Sexy Love - Ne-Yo'],channel='Ne-Yo - Topic'),[('Sexy Love','Ne-Yo')])
+        self.assertEqual(read(['50 Cent - 21 Questions','7 Rings']),[('21 Questions','50 Cent'),('7 Rings','Playlist Uploader')])
+
     def test_cancel_before_automatic_worker_registers_prevents_it_starting(self):
         saved=set_import.save_report(api,'Mix',None,[],None,checkpoint=(0,120,'mix.wav',0),plan={'samples':{}})
         entered,release=threading.Event(),threading.Event()

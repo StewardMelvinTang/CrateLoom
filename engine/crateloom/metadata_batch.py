@@ -179,6 +179,21 @@ class BatchManager:
                 self.update(index, state='cancelled')
                 return
             eligible = candidates_for_apply(result, identity)
+            title, artist = state['values']['title'], state['values']['artist']
+            if not eligible and title.strip() and artist.strip():
+                # Playlists written "Song - Artist" were imported with the two fields reversed. The
+                # same strict rules then decide; a match also puts title and artist back in place.
+                swapped = catalog_identity(artist, title)
+                if self.stop.is_set():
+                    self.update(index, state='cancelled')
+                    return
+                reversed_result = metadata_lookup.search(self.api, preparation.request, swapped, track['duration'])
+                reversed_eligible = candidates_for_apply(reversed_result, swapped)
+                if reversed_eligible:
+                    identity, result, eligible = swapped, reversed_result, reversed_eligible
+            if self.stop.is_set():
+                self.update(index, state='cancelled')
+                return
             if not eligible:
                 reason = 'No sufficiently similar release with an identified artist and album was found.'
                 self.store_review(track, result, 'needs_review', reason)

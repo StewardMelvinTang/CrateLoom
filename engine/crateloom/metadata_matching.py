@@ -13,6 +13,11 @@ DASH_VERSION = re.compile(r'\s+[-–—]\s+((?:[0-9]{4}\s+)?' + VERSION_PHRASE +
 # Without a delimiter only a full phrase counts: "In Da Club", "Born to Live"
 # and "The Original" are titles, "Song Club Mix" and "Song Radio Edit" are versions.
 PHRASE_VERSION = re.compile(r'\s+(' + VERSION_PHRASE + r'\s+(?:mix|edit|version)|instrumental)$', re.I)
+# A playlist position written before a name: "2 . Song", "16. Song", "03) Song". A dot or
+# bracket is required, so "50 Cent", "22" and "7 Rings" are left alone.
+TRACK_NUMBER = re.compile(r'^\s*[0-9]{1,3}\s*[.)]\s+(?=\S)')
+# Credits that only an artist side carries: an unbracketed "ft." or "feat.", or a list of names.
+ARTIST_CREDIT = re.compile(r'(?<![\[(])\b(?:feat\.?|ft\.?|featuring)\s|\s(?:&|x|vs\.?)\s|,\s', re.I)
 FEATURE = re.compile(r'\s*[\[(]\s*(?:feat\.?|ft\.?|featuring)\s+[^\])]+[\])]\s*|\s+(?:feat\.?|ft\.?|featuring)\s+.+$', re.I)
 
 
@@ -35,6 +40,7 @@ def normalized(value):
 def clean_name(value):
     value = unicodedata.normalize('NFKC', value).replace('_', ' ')
     value = re.sub(r'\.(?:mp3|flac|wav|aiff?|m4a|ogg|opus)$', '', value, flags=re.I)
+    value = TRACK_NUMBER.sub('', value)
     value = re.sub(r'[\[(]\s*' + NOISE + r'\s*[\])]', '', value, flags=re.I)
     value = re.sub(r'\b(?:klickaud|klikkaud)\b', '', value, flags=re.I)
     value = re.sub(r'\s+' + NOISE + r'\s*$', '', value, flags=re.I)
@@ -78,6 +84,43 @@ def search_identity(title, artist=''):
             artist, title = left, right
     base, version = split_version(title)
     return {'title': base or title, 'artist': artist, 'version': version}
+
+
+def artist_evidence(left, right):
+    """How strongly the right side of "left - right" reads as the artist rather than the left.
+
+    Positive: right looks like the artist; negative: left does; zero: no evidence. A version in
+    brackets ("Baby Boy (NIE Remix)") marks a song title, a credit list ("J. Cole ft Miguel",
+    "The Weeknd & Future") marks an artist.
+    """
+    def score(side):
+        value = ARTIST_CREDIT.search(side) is not None
+        version = re.search(r'[\[(][^\])]*' + VERSION_WORD.pattern + r'[^\])]*[\])]', side, re.I) is not None
+        return int(value) - int(version)
+    return score(right) - score(left)
+
+
+def title_first(names, uploaders=()):
+    """Whether a list of "X - Y" names is written song first, decided once for the whole list.
+
+    Lists are written one way throughout, so evidence from some entries (credit lists, bracketed
+    versions, an uploader that is one of the sides) decides the ones without any. Without evidence
+    the usual "Artist - Song" order is kept.
+    """
+    vote = 0
+    for name, uploader in zip(names, list(uploaders) + [''] * (len(names) - len(uploaders))):
+        parts = re.split(r'\s+[-–—]\s+', clean_name(name or ''), maxsplit=1)
+        if len(parts) != 2:
+            continue
+        left, right = parts
+        evidence = artist_evidence(left, right)
+        owner = normalized(re.sub(r'\s*(?:-\s*topic|vevo)$', '', uploader or '', flags=re.I))
+        if owner and owner == normalized(right):
+            evidence += 2
+        elif owner and owner == normalized(left):
+            evidence -= 2
+        vote += max(-2, min(2, evidence))
+    return vote > 0
 
 
 def catalog_identity(title, artist=''):

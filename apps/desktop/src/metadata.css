@@ -7,6 +7,8 @@
 .metadata-window .metadata-notice-dismiss { padding: 3px; border-color: transparent; background: transparent; color: var(--muted); }
 .metadata-window .metadata-notice-dismiss:hover { color: var(--text); border-color: var(--line); }
 .metadata-auto-note strong { font-weight: 600; }
+.metadata-window .metadata-swap { justify-self: start; display: inline-flex; align-items: center; gap: 6px; margin-top: -4px; padding: 4px 9px; font-size: 12px; color: var(--muted); }
+.metadata-window .metadata-swap:hover:not(:disabled) { color: var(--text); }
 .metadata-window .metadata-field-error { display: flex; align-items: center; gap: 5px; margin-top: 4px; color: var(--text); font-size: 11px; line-height: 1.4; }
 .metadata-fields input[aria-invalid=true] { border-color: var(--text); }
 

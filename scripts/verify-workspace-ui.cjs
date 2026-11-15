@@ -191,6 +191,12 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  const openFrame=await frameBox();assert.equal(openFrame.split(',').slice(2).join('x'),'1040x720');
  const columns=await page.evaluate(()=>['.metadata-details','.metadata-sources'].map(selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {left:r.left,right:r.right,top:r.top};}));
  assert.ok(columns[1].left>=columns[0].right && Math.abs(columns[1].top-columns[0].top)<1,JSON.stringify(columns));
+ // Swapping puts each field's text in the other; swapping again restores both.
+ const fieldPair=async()=>[await page.getByLabel('Metadata title',{exact:true}).inputValue(),await page.getByLabel('Metadata artist',{exact:true}).inputValue()];
+ const beforeSwap=await fieldPair();const swap=page.getByRole('button',{name:'Swap title and artist',exact:true});
+ await swap.click();assert.deepEqual(await fieldPair(),[beforeSwap[1],beforeSwap[0]]);
+ await swap.click();assert.deepEqual(await fieldPair(),beforeSwap);
+ checks.metadataSwap='Swap title and artist exchanges the two fields and swaps back';
  await watchFrame();
  await page.getByRole('button',{name:'Find matches',exact:true}).click();await page.locator('.metadata-skeleton-match').first().waitFor();await page.waitForTimeout(500);
  const candidate=page.locator('.metadata-match').first();assert.equal(await candidate.isEnabled(),true);
