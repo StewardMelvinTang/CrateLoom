@@ -7,7 +7,7 @@ import time
 import urllib.parse
 
 from . import providers
-from .metadata_matching import primary_artist, query_plan, rank_candidates
+from .metadata_matching import identity_layers, primary_artist, query_plan, rank_candidates
 
 POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='metadata-catalog')
 GATES = {'MusicBrainz': providers.MUSICBRAINZ_LOCK, 'Apple Music': threading.Lock()}
@@ -126,3 +126,55 @@ def search(api, request, identity, duration, refresh=False, progress=lambda resu
     if all(provider['state'] == 'unavailable' for provider in result['providers']):
         raise ValueError('Metadata catalogs could not be reached. Check your connection and refresh. Saved fields are still available.')
     return result
+
+
+def usable(result, identity):
+    return [c for c in result.get('candidates', []) if c.get('match_status') != 'rejected']
+
+
+def layered_search(api, request, title, artist, duration, refresh=False, progress=lambda result: None,
+                   accept=usable, loose=False, stop=lambda: False):
+    """Search the catalogs one layer at a time (see ``identity_layers``) until ``accept`` finds a match.
+
+    Returns ``(result, identity, accepted)``. Every layer's candidates are kept, best first, so a
+    review still shows what the other readings found. ``query`` names the reading that matched, or
+    the stored one when none did, with a ``note`` saying how it differs from the fields.
+    """
+    layers = identity_layers(title, artist, loose=loose)
+    if not layers:
+        raise ValueError('Enter a song title to search')
+    merged = None
+
+    def combine(result, query):
+        combined = json.loads(json.dumps(result))
+        combined.setdefault('candidates', []); combined.setdefault('warnings', []); combined.setdefault('cached', True)
+        if merged is not None:
+            key = lambda c: (c.get('provider'), c.get('recording_id'), c.get('release_id'))
+            seen = {key(c) for c in combined['candidates']}
+            combined['candidates'] += [c for c in merged['candidates'] if key(c) not in seen]
+            combined['warnings'] = list(dict.fromkeys(merged['warnings'] + combined['warnings']))
+            combined['cached'] = merged['cached'] and combined['cached']
+            combined['partial'] = bool(combined['warnings'])
+        combined['candidates'].sort(key=lambda c: (c.get('match_status') == 'rejected', -c.get('rank', 0)))
+        combined['query'] = query
+        return combined
+
+    for identity, note in layers:
+        if stop():
+            break
+        query = dict(identity, note=note) if note else dict(identity)
+        try:
+            result = search(api, request, identity, duration, refresh, lambda partial, query=query: progress(combine(partial, query)))
+        except ValueError:
+            if merged is None:
+                raise
+            break
+        accepted = accept(result, identity)
+        merged = combine(result, query)
+        if accepted:
+            return merged, identity, accepted
+    if merged is None:
+        raise ValueError('Search stopped.')
+    first = layers[0][0]
+    merged['query'] = dict(first)
+    return merged, first, []

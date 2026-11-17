@@ -1,0 +1,49 @@
+/* Change source: a fixed frame whose result list scrolls, so loading results never resizes the window. */
+.change-source-window { width: min(680px, 100%); height: min(640px, calc(100dvh - 64px)); display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 45px var(--shadow); }
+.change-source-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.change-source-head button { padding: 6px; }
+.change-source-search, .change-source-link { display: flex; align-items: center; gap: 8px; }
+.change-source-search { color: var(--muted); border: 1px solid var(--line); border-radius: 7px; padding: 0 4px 0 10px; background: var(--bg); }
+.change-source-search input { flex: 1; min-width: 0; border: 0; background: transparent; outline: 0; padding: 8px 0; }
+.change-source-search button { padding: 5px 10px; font-size: 12px; }
+.change-source-results { flex: 1; min-height: 0; overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.change-source-results ul { list-style: none; margin: 0; padding: 0; }
+.change-source-results h3 { margin: 0; padding: 10px 12px 4px; font-size: 11px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.change-source-empty { display: flex; align-items: center; gap: 8px; padding: 16px 12px; font-size: 13px; }
+.change-source-option { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+.change-source-option:last-child { border-bottom: 0; }
+.change-source-option[data-recommended] { background: var(--accent-soft); }
+.change-source-option > button { flex: none; font-size: 12px; padding: 6px 12px; }
+.change-source-option-text { flex: 1; display: grid; gap: 3px; min-width: 0; }
+.change-source-option-text small { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.change-source-title { justify-content: start; gap: 6px; min-width: 0; padding: 0; border: 0; background: transparent; font-size: 13px; font-weight: 600; text-align: left; }
+.change-source-title span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.change-source-title:hover:not(:disabled) span { text-decoration: underline; }
+.change-source-title svg { flex: none; color: var(--muted); }
+.change-source-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.change-source-badge { font-size: 10.5px; font-weight: 600; padding: 1px 6px; border-radius: 4px; background: var(--surface); border: 1px solid var(--line); color: var(--text); }
+.change-source-badge[data-kind=warning] { color: var(--muted); }
+.change-source-link label { display: inline-flex; align-items: center; gap: 5px; flex: none; font-size: 12px; color: var(--muted); }
+.change-source-link input { flex: 1; min-width: 0; }
+.change-source-link button { flex: none; font-size: 12px; padding: 6px 12px; }
+.change-source-foot { display: flex; justify-content: space-between; gap: 8px; }
+.change-source-done { flex: 1; display: grid; align-content: center; justify-items: start; gap: 12px; font-size: 13px; line-height: 1.5; }
+.change-source-done p { color: var(--text); }
+@media (max-width: 640px) {
+  .change-source-link { flex-wrap: wrap; }
+  .change-source-option { align-items: start; flex-direction: column; }
+}
+.change-source-track { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 8px 0 0; min-width: 0; }
+.change-source-track > div { display: grid; gap: 1px; min-width: 0; max-width: 100%; }
+.change-source-track > div:first-child { max-width: min(340px, 100%); }
+.change-source-track dt { font-size: 10.5px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.change-source-track dd { margin: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.change-source-player { display: flex; align-items: center; gap: 10px; padding: 8px 12px 8px 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.change-source-player-text { display: grid; gap: 1px; width: min(220px, 40%); min-width: 0; }
+.change-source-player-text strong { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.change-source-player-text .time { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.change-source-player input[type=range] { flex: 1; min-width: 60px; padding: 0; accent-color: var(--accent); }
+.change-source-play { flex: none; width: 30px; height: 30px; padding: 0; border-radius: 50%; }
+.change-source-player .change-source-play { width: 34px; height: 34px; background: var(--accent); border-color: var(--accent); color: var(--bg); }
+.change-source-option[data-previewing] .change-source-play { border-color: var(--accent); color: var(--accent); }
+.change-source-option > .change-source-play { padding: 0; }

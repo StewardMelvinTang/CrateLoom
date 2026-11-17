@@ -325,6 +325,12 @@ class Manager(AudioTransfer):
                 raise ValueError('Choose a release cover before downloading')
             art = str(art)
         review = {'source':source,'reference':reference,'fields':fields,'version':version,'artwork_path':art}
+        replace = params.get('replace_track_id')
+        if replace is not None:
+            # Change source: the download becomes this track's audio instead of a new track.
+            if not isinstance(replace,str) or not db.execute('SELECT 1 FROM tracks WHERE id=?',(replace,)).fetchone():
+                raise ValueError('The track to change is no longer in the library.')
+            review['replace_track_id'] = replace
         jid = str(uuid.uuid4());stamp = now()
         count = db.execute("SELECT count(*) FROM acquisitions WHERE state IN ('queued','downloading','verifying','importing','cancelling')").fetchone()[0]
         if count >= capacity:
@@ -506,6 +512,18 @@ class Manager(AudioTransfer):
                     output.flush()
                     os.fsync(output.fileno())
             self.update(jid,state='importing',stage='Importing',path=str(target),quality=json.dumps(quality));check()
+            previous = None
+            with self.import_lock, api.connect_existing() as db:
+                check()
+                if review.get('replace_track_id'):
+                    from . import source_change
+                    track,previous = source_change.replace_audio(api,db,review['replace_track_id'],str(target));duplicate = False;check()
+                    db.execute("UPDATE acquisitions SET state='completed',stage='Source changed',track_id=?,path=?,quality=?,duplicate=0,updated_at=? WHERE id=?",(track['id'],track['path'],json.dumps(quality),now(),jid))
+            if previous is not None:
+                committed = True
+                with api.connect_existing() as db:
+                    source_change.discard_previous(api,db,previous)
+                return False
             with self.import_lock, api.connect_existing() as db:
                 check()
                 track,duplicate = api.import_track(db,str(target));check()

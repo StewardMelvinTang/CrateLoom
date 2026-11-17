@@ -1,12 +1,13 @@
 import {useCallback, useState} from 'react';
 import {pendingTags, trackBpm, type Track} from './types';
 
-export type ColumnId = 'title' | 'artist' | 'bpm' | 'key' | 'time' | 'status';
+export type ColumnId = 'number' | 'title' | 'artist' | 'bpm' | 'key' | 'time' | 'status';
 export type TrackSort = {column: ColumnId; direction: 'asc' | 'desc'} | null;
-type Resizable = Exclude<ColumnId, 'title'>;
+export type Resizable = Exclude<ColumnId, 'number'>;
 
-/** Title always takes the remaining width; the others can be resized from their left edge. */
+/** Every column but # is resized from its right edge. Title and Artist share the free space until both are sized. */
 export const COLUMNS: {id: ColumnId; label: string; sortLabel: string; numeric?: boolean}[] = [
+  {id: 'number', label: '#', sortLabel: 'position', numeric: true},
   {id: 'title', label: 'Title', sortLabel: 'title'},
   {id: 'artist', label: 'Artist', sortLabel: 'artist'},
   {id: 'bpm', label: 'BPM', sortLabel: 'tempo', numeric: true},
@@ -15,10 +16,8 @@ export const COLUMNS: {id: ColumnId; label: string; sortLabel: string; numeric?:
   {id: 'status', label: 'Status', sortLabel: 'status'},
 ];
 export const WIDTH_LIMITS: Record<Resizable, {min: number; max: number}> = {
-  artist: {min: 70, max: 520}, bpm: {min: 40, max: 140}, key: {min: 38, max: 140}, time: {min: 40, max: 140}, status: {min: 70, max: 420},
+  title: {min: 120, max: 900}, artist: {min: 70, max: 520}, bpm: {min: 40, max: 140}, key: {min: 38, max: 140}, time: {min: 40, max: 140}, status: {min: 70, max: 420},
 };
-/** Default track list widths. Artist shares the free space with Title until it is resized. */
-const DEFAULT_WIDTHS: Record<Resizable, string> = {artist: 'minmax(100px,1fr)', bpm: '48px', key: '44px', time: '46px', status: 'minmax(118px,150px)'};
 
 const SORT_KEY = 'trackSort', WIDTH_KEY = 'trackColumnWidths';
 const read = <T,>(key: string, fallback: T): T => { try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) as T : fallback; } catch { return fallback; } };
@@ -54,7 +53,10 @@ export function useColumnWidths() {
     write(WIDTH_KEY, next);
     return next;
   }), []);
-  const style = Object.fromEntries((Object.keys(DEFAULT_WIDTHS) as Resizable[]).map(id => [`--col-${id}`, widths[id] ? `${widths[id]}px` : DEFAULT_WIDTHS[id]]));
+  // Unsized columns keep the stylesheet's defaults. Once Title and Artist both have a width,
+  // Status takes the free space so the row actions stay at the right edge.
+  const style: Record<string, string> = Object.fromEntries((Object.keys(WIDTH_LIMITS) as Resizable[]).filter(id => widths[id]).map(id => [`--col-${id}`, `${widths[id]}px`]));
+  if (widths.title && widths.artist && !widths.status) style['--col-status'] = 'minmax(118px,1fr)';
   return {widths, setWidth, style};
 }
 
@@ -73,6 +75,7 @@ const statusRank = (track: Track) => (track.missing ? 0 : pendingTags(track) ? 1
 
 function value(track: Track, column: ColumnId): string | number | null {
   switch (column) {
+    case 'number': return null;
     case 'title': return track.title.trim() || null;
     case 'artist': return track.artist.trim() || null;
     case 'bpm': return trackBpm(track);
@@ -86,7 +89,8 @@ function value(track: Track, column: ColumnId): string | number | null {
 export function sortTracks<T extends Track>(tracks: T[], sort: TrackSort): T[] {
   if (!sort) return tracks;
   const sign = sort.direction === 'asc' ? 1 : -1;
-  return tracks.map((track, index) => ({track, index, key: value(track, sort.column)})).sort((a, b) => {
+  // # is the list's own order: the playlist's positions, or the library's.
+  return tracks.map((track, index) => ({track, index, key: sort.column === 'number' ? index : value(track, sort.column)})).sort((a, b) => {
     if (a.key === null || b.key === null) return a.key === b.key ? a.index - b.index : a.key === null ? 1 : -1;
     const order = typeof a.key === 'number' && typeof b.key === 'number' ? a.key - b.key : text.compare(String(a.key), String(b.key));
     return order ? order * sign : a.index - b.index;

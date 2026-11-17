@@ -1,0 +1,26 @@
+/* Add tracks from the library to a playlist: a fixed frame whose list scrolls. */
+.add-library-window { width: min(620px, 100%); height: min(640px, calc(100dvh - 64px)); display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 10px 45px var(--shadow); }
+.add-library-head { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.add-library-head h2 { overflow-wrap: anywhere; }
+.add-library-head p { font-size: 12px; margin-top: 4px; }
+.add-library-head button { padding: 6px; }
+.add-library-search { display: flex; align-items: center; gap: 8px; color: var(--muted); border: 1px solid var(--line); border-radius: 7px; padding: 0 10px; background: var(--bg); }
+.add-library-search input { flex: 1; min-width: 0; border: 0; background: transparent; outline: 0; padding: 8px 0; }
+.add-library-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
+.add-library-bar label { display: inline-flex; align-items: center; gap: 7px; }
+.add-library-bar input, .add-library-list input { accent-color: var(--accent); }
+.add-library-list { flex: 1; min-height: 0; overflow: auto; list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+.add-library-list li { border-bottom: 1px solid var(--line); }
+.add-library-list li:last-child { border-bottom: 0; }
+.add-library-list label { display: flex; align-items: center; gap: 10px; padding: 7px 12px; cursor: pointer; min-width: 0; }
+.add-library-list li:not([data-added]) label:hover { background: var(--accent-soft); }
+.add-library-list li[data-added] label { cursor: default; opacity: .62; }
+.add-library-list .cover { width: 30px; height: 30px; flex: none; overflow: hidden; }
+.add-library-list .cover img { width: 100%; height: 100%; object-fit: cover; }
+.add-library-text { flex: 1; display: grid; min-width: 0; }
+.add-library-text strong, .add-library-text small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.add-library-text strong { font-size: 13px; font-weight: 600; }
+.add-library-text small { font-size: 11.5px; color: var(--muted); }
+.add-library-added { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--muted); }
+.add-library-empty { padding: 16px 12px; font-size: 13px; color: var(--muted); }
+.add-library-foot { display: flex; justify-content: flex-end; gap: 8px; }

@@ -18,6 +18,13 @@ PHRASE_VERSION = re.compile(r'\s+(' + VERSION_PHRASE + r'\s+(?:mix|edit|version)
 TRACK_NUMBER = re.compile(r'^\s*[0-9]{1,3}\s*[.)]\s+(?=\S)')
 # Credits that only an artist side carries: an unbracketed "ft." or "feat.", or a list of names.
 ARTIST_CREDIT = re.compile(r'(?<![\[(])\b(?:feat\.?|ft\.?|featuring)\s|\s(?:&|x|vs\.?)\s|,\s', re.I)
+# Bracketed tags that never belong to a song name: "(Explicit)", "[Official Video]", "(Prod. by X)".
+BRACKET_NOISE = re.compile(r'\s*[\[(]\s*(?:explicit|clean|dirty|audio|video|official|lyric\s+video|music\s+video|visuali[sz]er|prod\.?\s+by\s+[^\])]+|produced\s+by\s+[^\])]+)\s*[\])]', re.I)
+# A bracketed alternative name, "Ain't No Way (You Won't Love Me)", may be left out on one side.
+# Brackets naming a part, an interlude or an edit are a different recording and are kept.
+SUBTITLE = re.compile(r'\s*[\[(]([^\])]*)[\])]')
+DISTINCT_BRACKET = re.compile(r'\d|\b(?:part|pt|vol|volume|chapter|interlude|intro|outro|reprise|skit|demo|sped|slowed|reverb|nightcore|8d|cover|karaoke|tribute|medley)\b', re.I)
+DASH_SUBTITLE = re.compile(r'\s+[-–—/]\s+.+$')
 FEATURE = re.compile(r'\s*[\[(]\s*(?:feat\.?|ft\.?|featuring)\s+[^\])]+[\])]\s*|\s+(?:feat\.?|ft\.?|featuring)\s+.+$', re.I)
 
 
@@ -33,7 +40,8 @@ def base_title(value):
 
 
 def normalized(value):
-    value = unicodedata.normalize('NFKD', value).casefold()
+    # "Ain't" and "Ain’t" and "Aint" compare equal; "&" reads as "and".
+    value = re.sub(r"['’`´]", '', unicodedata.normalize('NFKD', value).casefold()).replace('&', ' and ')
     return ' '.join(re.findall(r'[^\W_]+', ''.join(c for c in value if not unicodedata.combining(c))))
 
 
@@ -42,6 +50,7 @@ def clean_name(value):
     value = re.sub(r'\.(?:mp3|flac|wav|aiff?|m4a|ogg|opus)$', '', value, flags=re.I)
     value = TRACK_NUMBER.sub('', value)
     value = re.sub(r'[\[(]\s*' + NOISE + r'\s*[\])]', '', value, flags=re.I)
+    value = BRACKET_NOISE.sub(' ', value)
     value = re.sub(r'\b(?:klickaud|klikkaud)\b', '', value, flags=re.I)
     value = re.sub(r'\s+' + NOISE + r'\s*$', '', value, flags=re.I)
     return re.sub(r'\s+', ' ', value).strip(' -–—')
@@ -139,6 +148,59 @@ def similarity(left, right):
     return max(SequenceMatcher(None, left, right).ratio(), len(a & b) / max(len(a), len(b)))
 
 
+def main_title(value):
+    """The name without bracketed alternative names: "Ain't No Way (You Won't Love Me)" -> "Ain't No Way"."""
+    kept = SUBTITLE.sub(lambda match: match[0] if DISTINCT_BRACKET.search(match[1]) else ' ', value)
+    kept = re.sub(r'\s+', ' ', kept).strip(' -–—')
+    return kept or value
+
+
+def title_similarity(expected, actual):
+    """Title agreement, allowing an alternative name in brackets or after a dash on one side.
+
+    An exact name scores 1. The same main name with a bracketed alternative on one side scores .96,
+    after a dash .93, so a strict match still prefers the identical title.
+    """
+    expected, actual = base_title(expected), base_title(actual)
+    score = similarity(expected, actual)
+    main_expected, main_actual = main_title(expected), main_title(actual)
+    if (main_expected, main_actual) != (expected, actual):
+        score = max(score, .96 * similarity(main_expected, main_actual))
+    dash_expected, dash_actual = DASH_SUBTITLE.sub('', main_expected), DASH_SUBTITLE.sub('', main_actual)
+    if (dash_expected, dash_actual) != (main_expected, main_actual) and min(len(normalized(dash_expected)), len(normalized(dash_actual))) >= 3:
+        score = max(score, .93 * similarity(dash_expected, dash_actual))
+    return round(score, 4)
+
+
+def identity_layers(title, artist='', swapped=True, loose=False):
+    """Searches to try in turn, most literal first, each cleaned the same way.
+
+    1. the fields as stored; 2. title and artist exchanged (playlists written song first);
+    3. the title without a bracketed alternative name; 4. an "Artist - Song" name written into the
+    title field, ignoring an uploader in the artist field; with ``loose``, 5. the title alone.
+    """
+    layers = []
+    def add(identity, note):
+        if identity['title'] and all((identity['title'], identity['artist'], identity['version']) != (x['title'], x['artist'], x['version']) for x, _ in layers):
+            layers.append((identity, note))
+    first = catalog_identity(title, artist)
+    add(first, '')
+    if swapped and clean_name(title) and clean_name(artist):
+        add(catalog_identity(artist, title), 'title and artist exchanged')
+    for identity, note in list(layers):
+        short = main_title(identity['title'])
+        if short != identity['title']:
+            add(dict(identity, title=short), ', '.join(filter(None, [note, 'without the name in brackets'])))
+    if artist and re.search(r'\s[-–—]\s', clean_name(title)):
+        embedded = catalog_identity(title)
+        if embedded['artist']:
+            add(embedded, 'artist taken from the title')
+            add(catalog_identity(embedded['artist'], embedded['title']), 'artist taken from the title, exchanged')
+    if loose and first['artist']:
+        add(dict(first, artist=''), 'title only')
+    return layers
+
+
 def query_plan(identity, duration):
     quote = lambda text: '"' + text.replace('\\', '\\\\').replace('"', '\\"') + '"'
     base = 'recording:' + quote(identity['title'])
@@ -166,7 +228,7 @@ def rank_candidates(payload, duration, identity):
         version = ' / '.join(filter(None, [title_version, comment if VERSION_WORD.search(comment) else '']))
         expected = normalized(identity['version'])
         actual = normalized(version)
-        title_score = similarity(base_title(identity['title']), base_title(base))
+        title_score = title_similarity(identity['title'], base)
         artist_score = max(similarity(identity['artist'], artist), similarity(primary_artist(identity['artist']), primary_artist(artist))) if identity['artist'] else .5
         length = recording.get('length')
         seconds = length / 1000 if isinstance(length, (int, float)) and math.isfinite(length) and length > 0 else None

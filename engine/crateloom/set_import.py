@@ -44,7 +44,15 @@ SEPARATOR = re.compile(r'\s+[-–—]\s+')
 LINK = re.compile(r'https://[^\s<>]+')
 FREE_DOWNLOAD = '45d0cbc5-d65b-4e77-bdfd-8a75207cb5c5'
 VERSION_CREDIT = re.compile(r'\b(edit|remix|mix|flip|refunk|rework|bootleg|version|blend)$', re.I)
-VIDEO_VARIANT = re.compile(r'\b(sped up|slowed|nightcore|karaoke|cover|reaction|remastered|live|instrumental)\b', re.I)
+# Read on normalized text, where "M/V" becomes "m v". A lyric video or visualizer carries the song's own audio.
+MUSIC_VIDEO = re.compile(r'\b(?:official\s+(?:music\s+)?video|music\s+video|official\s+mv|mv|m\s+v|short\s+film|video\s+oficial|clip\s+officiel)\b')
+
+
+def music_video(title, song=''):
+    """Whether a video title labels a music video; a song named "Video Games" or "MV" is not one."""
+    return bool(MUSIC_VIDEO.search(normalized(title))) and not MUSIC_VIDEO.search(normalized(song))
+AUDIO_LABEL = re.compile(r'\b(?:official\s+)?audio\b')
+VIDEO_VARIANT = re.compile(r'\b(sped up|slowed|nightcore|karaoke|cover|reaction|remastered|live|instrumental|acoustic|a ?cappella|acapella|vocals|stems|8d|reverb|bass boosted)\b', re.I)
 FEATURE_CREDIT = re.compile(r'\s+(?:[\[(]\s*)?(?:ft|feat|featuring)\.?\s+', re.I)
 
 
@@ -179,11 +187,18 @@ def credit_options(item):
     return options
 
 
+def expected_length(item):
+    """The song's own length: the listed one, else the catalog's."""
+    return item.get('duration') or item.get('catalog_duration')
+
+
 def video_match(item, videos):
     matches, suggestions = [], []
-    expected_duration = item.get('duration')
+    expected_duration = expected_length(item)
     for video in videos:
         title = clean_name(video['title'])
+        # "Artist - Topic" channels hold YouTube's audio-only uploads of released recordings.
+        topic = bool(re.search(r'\s+-\s+Topic$', video.get('channel') or '', re.I))
         channel = re.sub(r'\s+-\s+Topic$', '', video.get('channel') or '', flags=re.I)
         url = 'https://www.youtube.com/watch?v=' + video['id']
         if not item['artist']:
@@ -205,14 +220,14 @@ def video_match(item, videos):
                 continue
             if not any(s['url'] == url for s in suggestions):
                 suggestions.append({'title': video['title'], 'url': url, 'duration': video['duration'],
-                                    'channel': channel, 'verified': video.get('channel_is_verified') is True})
+                                    'channel': channel, 'verified': video.get('channel_is_verified') is True, 'topic': topic})
             if expected not in possible or (VIDEO_VARIANT.search(title) and not VIDEO_VARIANT.search(song)):
                 continue
             if expected_duration and abs(video['duration'] - expected_duration) > max(5, expected_duration * .04):
                 continue
             official = video.get('channel_is_verified') is True and normalized(channel) == expected[0]
-            # Prefer a recording from the artist and avoid music video intros when possible.
-            score = 4 * official + (2 if normalized(title) == normalized(song) else 0)
+            # Prefer the audio-only upload, then a recording from the artist, and avoid music video intros.
+            score = 6 * topic + 4 * official + (2 if normalized(title) == normalized(song) else 0) - 5 * music_video(video['title'], song)
             matches.append((score, url, artist, song))
     # Two different interpretations of the same row need user review.
     if len({(artist, song) for _, _, artist, song in matches}) > 1:
@@ -229,15 +244,66 @@ def source_priority(item, option):
         return None
     if not expected['version'] and re.search(r'\b(remix|bootleg|rework|mashup)\b', title):
         return None
-    duration, original = option.get('duration'), item.get('duration')
+    duration, original = option.get('duration'), expected_length(item)
     extended = bool(re.search(r'\bextended\b', title))
     if duration and original and not original * .65 <= duration <= original * (2.2 if extended else 1.4):
         return None
-    video = bool(re.search(r'\b(music video|official video|mv)\b', title))
-    score = 40 * extended + 8 * bool(re.search(r'\b(audio|topic)\b', title)) + 4 * option.get('verified', False) - 20 * video
+    video = music_video(option['title'], item['title'])
+    # The audio-only "Topic" upload is the released recording without a video's intro or outro.
+    score = 40 * extended + 12 * bool(option.get('topic')) + 8 * bool(AUDIO_LABEL.search(title)) + 4 * option.get('verified', False) - 20 * video
     if duration and original and not extended:
         score -= abs(duration - original) / original * 12
     return score, -(duration or 900)
+
+
+def audio_version(api, item, listed, page, search=None):
+    """The audio-only upload to use instead of a playlist's linked music video, or None to keep the video.
+
+    The linked video counts as a music video when its title says so, or when the song's audio-only
+    upload ("Artist - Topic", or an "Official Audio" upload) is clearly shorter. A video already from
+    a Topic channel, or one no audio upload contradicts, is kept.
+    """
+    if listed.get('topic') or not item.get('artist') or item.get('needs_review'):
+        return None
+    search = search or (lambda query: youtube_audio.search(api, query))
+    marked = music_video(listed.get('raw_title') or '', item['title'])
+    length = listed.get('duration')
+    if type(length) not in (int, float) or length <= 0:
+        return None
+    probe = dict(item, duration=None, catalog_duration=None)
+
+    def audio_uploads(query):
+        try:
+            videos = search(query)
+        except ValueError:
+            return []
+        videos = [video for video in videos if not page[2].endswith('=' + video['id'])]
+        _, found = video_match(probe, videos)
+        return [option for option in found if not option.get('title_only')
+                and (option.get('topic') or AUDIO_LABEL.search(normalized(option['title'])))
+                and not music_video(option['title'], item['title']) and not re.search(r'\bextended\b', normalized(option['title']))
+                and source_priority(probe, option) is not None
+                # A video may be a shortened edit, but not a different piece altogether.
+                and length * .5 <= option['duration'] <= length + max(8, length * .06)]
+
+    query = ' '.join((item['artist'], item['title']))
+    audio = audio_uploads(query)
+    if not audio and marked:
+        # A labelled music video is worth one more search aimed at the audio upload.
+        audio = audio_uploads(query + ' audio')
+    audio.sort(key=lambda option: (not option.get('topic'), not option.get('verified')))
+    for option in audio[:3]:
+        if not marked and length - option['duration'] <= max(8, option['duration'] * .06):
+            # The same length as the song: the linked video has no intro or outro worth avoiding.
+            return None
+        try:
+            replacement, _, _ = youtube_audio.resolve(api, service_links.identify(option['url']))
+        except (ValueError, OSError):
+            continue
+        # The playlist's own link stays under its service name; this records why it was not downloaded.
+        item['music_video_skipped'] = page[1]
+        return replacement
+    return None
 
 
 def recommend_sources(item):
@@ -258,7 +324,8 @@ def recommend_sources(item):
     if ranked:
         best = ranked[0][2]
         best['recommended'] = True
-        best['recommendation_reason'] = 'Extended mix' if re.search(r'\bextended\b', normalized(best['title'])) else 'Audio version / closest duration'
+        best['recommendation_reason'] = ('Extended mix' if re.search(r'\bextended\b', normalized(best['title']))
+                                         else 'Audio-only upload' if best.get('topic') else 'Audio version / closest duration')
     options.sort(key=lambda option: not option.get('recommended', False))
     item['source_options'] = options[:10]
     return next((option for option in item['source_options'] if option.get('recommended')), None)
@@ -1319,7 +1386,8 @@ def report(db, sid):
         auto = db.execute('SELECT enabled,failures FROM dj_set_auto_scan WHERE set_id=?',(sid,)).fetchone()
         result['scan'].update(automatic=bool(auto and auto['enabled']), running=AUTO_RUNNING==sid,
                               stalled=bool(auto and auto['failures']>=MAX_STALLED_ATTEMPTS),
-                              fast='plan' in state,samples=len(state.get('plan',{}).get('samples',{})))
+                              fast='plan' in state,samples=len(state.get('plan',{}).get('samples',{})),
+                              sampled_until=sampled_until(state))
         control = set_scan_jobs.for_database(db,sid)
         if control:
             result['scan'].update(running=True,cancelling=control.stop.is_set(),progress=dict(control.progress))
@@ -1383,22 +1451,38 @@ def report(db, sid):
     return result
 
 
-def waiting_progress(state, stage, resume_at):
-    """Progress for a scan that waits to continue, in the shape its worker reports while running.
-
-    A sampled (fast) pass keeps its offset at the start of the batch until the batch ends, so its
-    position is the furthest sample taken, not the offset; the offset alone would read 0:00.
-    """
+def sampled_times(state):
     plan = state.get('plan')
     samples = plan.get('samples') if isinstance(plan, dict) else None
     if not isinstance(samples, dict):
-        return {'stage':stage,'completed':state['offset'],'total':state['duration'],'unit':'seconds','resume_at':resume_at}
+        return None
     taken = []
     for at in samples:
         try:
             taken.append(float(at))
         except (TypeError, ValueError):
             continue
+    return taken
+
+
+def sampled_until(state):
+    """How far a sampled pass has listened. Its offset stays at the batch start until the batch ends."""
+    taken = sampled_times(state)
+    if taken is None:
+        return None
+    return max(taken, default=state['offset'] or 0)
+
+
+def waiting_progress(state, stage, resume_at):
+    """Progress for a scan that waits to continue, in the shape its worker reports while running.
+
+    A sampled (fast) pass keeps its offset at the start of the batch until the batch ends, so its
+    position is the furthest sample taken, not the offset; the offset alone would read 0:00.
+    """
+    taken = sampled_times(state)
+    if taken is None:
+        return {'stage':stage,'completed':state['offset'],'total':state['duration'],'unit':'seconds','resume_at':resume_at}
+    samples = state['plan']['samples']
     found = {match.get('key') for match in samples.values() if isinstance(match, dict) and match.get('key')}
     return {'stage':stage,'completed':len(taken),'total':None,'unit':'samples','position':max(taken, default=state['offset'] or 0),
             'duration':state['duration'],'tracks_found':len(found),'resume_at':resume_at}
@@ -1684,6 +1768,8 @@ def source_for(api, item, explicit_url, watch=None, discovered=None):
             except (ValueError, OSError):
                 pass
             else:
+                # A playlist often links the music video; its intro or outro does not belong in a DJ library.
+                source = audio_version(api, item, source, page) or source
                 source = providers.register(api, source)
                 values = {'title': item['title'], 'artist': item['artist'] or source['values']['artist']}
                 return {'source_id': source['id'], 'values': values, 'artwork_path': item.get('artwork_path')}, None
@@ -1705,6 +1791,9 @@ def source_for(api, item, explicit_url, watch=None, discovered=None):
             lookup_error = str(error)
     if reference:
         add_link(item, 'MusicBrainz', reference['source_url'])
+        # Without a listed length the catalog's lets the search tell a music video from the song.
+        if not item.get('duration') and isinstance(reference.get('duration'), (int, float)) and reference['duration'] > 0:
+            item['catalog_duration'] = reference['duration']
     free_links = catalog_sources(item, catalog_links)
     urls = [*item['listed_links'], *free_links] if not item.get('needs_review') else []
     if not item.get('needs_review') and soundcloud_download.configured() and not any('soundcloud.com/' in url for url in urls):

@@ -19,7 +19,7 @@ from . import download_http, service_links
 from .metadata_matching import search_identity
 
 NAMES = ('YouTube', 'YouTube Music')
-FIELDS = '%(.{id,title,artist,duration,url,ext,protocol,format_id,filesize,filesize_approx,http_headers,is_live,availability,available_at})j'
+FIELDS = '%(.{id,title,artist,channel,duration,url,ext,protocol,format_id,filesize,filesize_approx,http_headers,is_live,availability,available_at})j'
 MEDIA_CACHE = {}
 MEDIA_LOCK = threading.Lock()
 MEDIA_TTL = 120
@@ -502,7 +502,9 @@ def resolve(api, reference, format_id=None, *, scan=False):
     source = {'kind': 'direct', 'adapter': 'youtube', 'provider': provider, 'can_acquire': True,
             'url': page, 'display_url': page, 'filename': title + '.' + data['ext'], 'format_id': selected,
             'duration': duration, 'declared_bytes': size, 'version': identity['version'],
-            'values': {'title': identity['title'] or title, 'artist': identity['artist']}}
+            'values': {'title': identity['title'] or title, 'artist': identity['artist']},
+            # What the page is: its full title (for "Official Video" and the like) and whether a Topic channel holds it.
+            'raw_title': title, 'topic': bool(re.search(r'\s+-\s+Topic$', service_links.clean(data.get('channel')) or '', re.I))}
     note_ready(media, data.get('available_at'))
     if format_id is None:
         with MEDIA_LOCK:

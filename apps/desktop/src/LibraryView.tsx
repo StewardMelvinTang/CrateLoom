@@ -1,6 +1,6 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {convertFileSrc} from '@tauri-apps/api/core';
-import {Activity, ArrowDown, ArrowUp, ChevronDown, ChevronUp, Copy, FolderOpen, FolderSearch, GripVertical, Link2, ListPlus, Music2, Pause, Play, Plus, SlidersHorizontal, Tags, Trash2, Upload, WandSparkles, X} from 'lucide-react';
+import {Activity, ArrowDown, ArrowUp, ChevronDown, ChevronUp, FolderOpen, GripVertical, MoreHorizontal, Link2, ListPlus, Music2, Pause, Play, Plus, SlidersHorizontal, Tags, Trash2, Upload, WandSparkles, X} from 'lucide-react';
 import {Disclosure} from './Disclosure';
 import {Select} from './Select';
 import {Menu} from './Menu';
@@ -9,9 +9,10 @@ import {PanelPresence} from './PanelMotion';
 import {MetadataBatchProgress, type useMetadataBatch} from './MetadataBatch';
 import type {useTrackReorder} from './useTrackReorder';
 import {message} from './engine';
-import {ContextMenu, copyText} from './ContextMenu';
-import {COLUMNS, WIDTH_LIMITS, clampWidth, sortTracks, trackKey, useColumnWidths, type ColumnId, type TrackSort} from './trackColumns';
-import {pendingTags, plural, time, trackBpm, type Playlist, type Track} from './types';
+import {menuAt, type TrackMenuRequest} from './TrackMenu';
+import {Overview} from './CueEditor';
+import {COLUMNS, WIDTH_LIMITS, clampWidth, sortTracks, trackKey, useColumnWidths, type ColumnId, type Resizable, type TrackSort} from './trackColumns';
+import {pendingTags, plural, time, trackBpm, type AnalysisData, type Playlist, type Track} from './types';
 
 export type LibraryFilter = 'all' | 'missing' | 'unwritten';
 export type ExportSelector = {id: string} | {playlist_id: string} | {track_ids: string[]};
@@ -38,14 +39,14 @@ export type LibraryActions = {
   exportTracks: (selector: ExportSelector, name: string, copyAudio: boolean) => void;
   moveTrack: (id: string, direction: number) => void;
   importFiles: () => void;
-  /** Show the track's audio file in Finder. */
-  reveal: (track: Track) => Promise<void>;
+  /** Open the track's menu: playback, playlists, copy, source, Finder, remove and delete. */
+  openMenu: (request: TrackMenuRequest) => void;
 };
 
 type RowHandlers = Pick<LibraryActions, 'select' | 'edit' | 'togglePlay' | 'relink' | 'openMetadata' | 'moveTrack'> & {
   setSelected: (id: string, selected: boolean) => void;
   handle: ReturnType<typeof useTrackReorder>['handle'];
-  openContext: (track: Track, x: number, y: number) => void;
+  openMenu: (request: TrackMenuRequest) => void;
 };
 
 /** Handlers whose identity never changes, so memoised rows are not re-rendered by unrelated state. */
@@ -59,26 +60,21 @@ function useStableHandlers<T extends Record<string, (...args: never[]) => unknow
   }, []);
 }
 
-const TrackRow = React.memo(function TrackRow({track, order, selected, active, playing, first, last, ordering, sorted, dropTarget, handlers}: {
-  track: Track; order: number | null; selected: boolean; active: boolean; playing: boolean; first: boolean; last: boolean;
+const TrackRow = React.memo(function TrackRow({track, order, position, selected, active, playing, first, last, ordering, sorted, dropTarget, handlers}: {
+  track: Track; order: number | null; position: number; selected: boolean; active: boolean; playing: boolean; first: boolean; last: boolean;
   ordering: boolean; sorted: boolean; dropTarget: boolean; handlers: RowHandlers;
 }) {
   const bpm = trackBpm(track), key = trackKey(track), unwritten = pendingTags(track), isPlaying = active && playing;
   // While the list is sorted, rows are not in playlist order, so they cannot be moved.
   const locked = ordering || sorted, lockedTitle = sorted ? 'Clear the sort to reorder' : undefined;
   return <div className={`track-row ${active ? 'selected' : ''} ${dropTarget ? 'drop-target' : ''}`} data-reorder-group="playlist" data-reorder-id={track.id}
-    onContextMenu={event => {
-      event.preventDefault();
-      // The keyboard menu key reports no pointer position; open beside the row instead.
-      const box = event.currentTarget.getBoundingClientRect();
-      handlers.openContext(track, event.clientX || box.left + 48, event.clientY || box.top + box.height / 2);
-    }}>
+    onContextMenu={event => { event.preventDefault(); handlers.openMenu(menuAt(event, track)); }}>
+    <span className="track-number">
+      {order !== null && <button className="reorder-handle" {...handlers.handle(track.id)} disabled={locked} title={lockedTitle ?? 'Drag to reorder, or press Up / Down'} aria-label={`Reorder ${track.title}. Use up or down arrow keys.`}
+        onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); handlers.moveTrack(track.id, event.key === 'ArrowUp' ? -1 : 1); } }}><GripVertical size={15}/></button>}
+      <span className="track-order time">{order ?? position}</span>
+    </span>
     <div className="track-title-cell">
-      {order !== null && <>
-        <button className="reorder-handle" {...handlers.handle(track.id)} disabled={locked} title={lockedTitle ?? 'Drag to reorder, or press Up / Down'} aria-label={`Reorder ${track.title}. Use up or down arrow keys.`}
-          onKeyDown={event => { if (event.key === 'ArrowUp' || event.key === 'ArrowDown') { event.preventDefault(); handlers.moveTrack(track.id, event.key === 'ArrowUp' ? -1 : 1); } }}><GripVertical size={15}/></button>
-        <span className="track-order time">{String(order).padStart(2, '0')}</span>
-      </>}
       <input type="checkbox" aria-label={`Select ${track.title}`} checked={selected} onChange={event => handlers.setSelected(track.id, event.target.checked)}/>
       <button className="cover cover-play" data-playing={isPlaying} disabled={track.missing} title={track.missing ? 'File missing' : isPlaying ? 'Pause' : 'Play'}
         aria-label={`${isPlaying ? 'Pause' : 'Play'} ${track.title}`} onClick={() => handlers.togglePlay(track)}>
@@ -101,7 +97,9 @@ const TrackRow = React.memo(function TrackRow({track, order, selected, active, p
     </span>
     <span className="track-row-actions">
       <button aria-label={`Edit cues for ${track.title}`} title="Edit cues" onClick={() => handlers.edit(track)}><SlidersHorizontal size={14}/></button>
-      <button aria-label={`Edit metadata for ${track.title}`} title="Edit metadata" onClick={() => handlers.openMetadata([track.id])}><Tags size={14}/></button>
+      <button className="row-metadata" aria-label={`Edit metadata for ${track.title}`} title="Edit metadata" onClick={() => handlers.openMetadata([track.id])}><Tags size={14}/></button>
+      <button aria-label={`More actions for ${track.title}`} title="More actions" aria-haspopup="menu"
+        onClick={event => { const box = event.currentTarget.getBoundingClientRect(); handlers.openMenu({track, x: box.right, y: box.bottom + 4, opener: event.currentTarget}); }}><MoreHorizontal size={14}/></button>
       {order !== null && <>
         <button aria-label={`Move ${track.title} up`} title={lockedTitle ?? 'Move up'} disabled={locked || first} onClick={() => handlers.moveTrack(track.id, -1)}><ArrowUp size={13}/></button>
         <button aria-label={`Move ${track.title} down`} title={lockedTitle ?? 'Move down'} disabled={locked || last} onClick={() => handlers.moveTrack(track.id, 1)}><ArrowDown size={13}/></button>
@@ -113,11 +111,13 @@ const TrackRow = React.memo(function TrackRow({track, order, selected, active, p
 const AUTO_WRITE_KEY = 'autoMetadataWriteTags';
 const AUTO_WRITE_TRUTH = 'Writes only tracks where a match and a cover are found. Each file is backed up first.';
 
-export function LibraryView({tracks, playlists, playlist, query, filter, onFilter, sort, onSort, loading, selectedIds, onSelectedIds, activeId, playing, ordering, reorder, exporting, importing, metadataBatch, unanalysed, actions}: {
+export function LibraryView({tracks, playlists, playlist, query, filter, onFilter, sort, onSort, loading, selectedIds, onSelectedIds, activeId, activeTrack, activeDetail, onSeek, playing, ordering, reorder, exporting, importing, metadataBatch, unanalysed, actions}: {
   tracks: Track[]; playlists: Playlist[]; playlist: Playlist | null; unanalysed: ReadonlySet<string>; query: string; filter: LibraryFilter; onFilter: (value: LibraryFilter) => void; loading: boolean;
   sort: TrackSort; onSort: (column: ColumnId) => void;
   selectedIds: string[]; onSelectedIds: (update: (ids: string[]) => string[]) => void; activeId: string | null; playing: boolean; ordering: boolean;
   reorder: ReturnType<typeof useTrackReorder>; exporting: boolean; importing: boolean; metadataBatch: ReturnType<typeof useMetadataBatch>; actions: LibraryActions;
+  /** The track in the player, with its sections and cues, and its waveform data: shown under its row. */
+  activeTrack: Track | null; activeDetail: AnalysisData | null; onSeek: (seconds: number) => void;
 }) {
   const [copyExportAudio, setCopyExportAudio] = useState(false);
   const [explainAuto, setExplainAuto] = useState(false);
@@ -128,13 +128,14 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
   const [toolError, setToolError] = useState('');
   const selectAll = useRef<HTMLInputElement>(null);
   const columns = useColumnWidths();
-  const [context, setContext] = useState<{track: Track; x: number; y: number; opener: Element | null} | null>(null);
 
   const scoped = useMemo(() => {
     if (!playlist) return tracks;
     const byId = new Map(tracks.map(track => [track.id, track]));
     return playlist.track_ids.map(id => byId.get(id)).filter((track): track is Track => !!track);
   }, [playlist, tracks]);
+  // # shows each track's place in the list's own order, whatever the sort.
+  const positions = useMemo(() => new Map(scoped.map((track, index) => [track.id, index + 1])), [scoped]);
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
     return sortTracks(scoped, sort).filter(track => (filter !== 'missing' || track.missing) && (filter !== 'unwritten' || pendingTags(track))
@@ -157,14 +158,8 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
     select: actions.select, edit: actions.edit, togglePlay: actions.togglePlay, relink: actions.relink, openMetadata: actions.openMetadata, moveTrack: actions.moveTrack,
     setSelected: (id, on) => onSelectedIds(ids => on ? [...ids.filter(item => item !== id), id] : ids.filter(item => item !== id)),
     handle: reorder.handle,
-    openContext: (track, x, y) => setContext({track, x, y, opener: document.activeElement}),
+    openMenu: actions.openMenu,
   });
-  const closeContext = (restoreFocus: boolean) => {
-    const opener = context?.opener;
-    setContext(null);
-    if (restoreFocus && opener instanceof HTMLElement && opener.isConnected) opener.focus();
-  };
-  const copy = (value: string) => { setToolError(''); void copyText(value).catch(error => setToolError(message(error))); };
   const run = (task: Promise<void>) => { setToolError(''); void task.catch(error => setToolError(message(error))); };
   const startAuto = () => {
     if (!autoTargets.length || autoBusy) return;
@@ -215,8 +210,7 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
         onClick={startAuto}><WandSparkles size={15}/> {metadataBatch.starting ? 'Starting…' : 'Auto metadata'}{autoTargets.length ? ` · ${autoScope}` : ''}</button>
       {/* Belongs to Auto metadata and applies to its next run, so it is fixed while a run is going. */}
       <label className="auto-write-option" title={autoBusy ? 'Applies to the next Auto metadata run.' : `After Auto metadata applies a match and cover, also write them into the audio file. ${AUTO_WRITE_TRUTH}`}>
-        <input type="checkbox" checked={autoWrite} disabled={autoBusy} aria-describedby={autoWrite ? 'auto-write-note' : undefined} onChange={event => chooseAutoWrite(event.target.checked)}/> Write tags to the files automatically</label>
-      {autoWrite && <small id="auto-write-note" className="auto-write-note">{AUTO_WRITE_TRUTH}</small>}
+        <input type="checkbox" checked={autoWrite} disabled={autoBusy} onChange={event => chooseAutoWrite(event.target.checked)}/> Write tags to the files automatically</label>
       {analysisTargets.length > 0 && <button className="analyze-beats"
         title={`Detect tempo, key, beat grid and waveform colours for ${plural(analysisTargets.length, 'track')} without a current analysis. Runs in the background, one track at a time; your cues and grid edits are kept.`}
         onClick={() => actions.analyze(analysisTargets)}><Activity size={15}/> Analyze tempo &amp; key · {analysisTargets.length}</button>}
@@ -251,32 +245,31 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
           title={`Sort by ${column.sortLabel} (${next})`}>
           <span>{column.label}</span>{active && (direction === 'asc' ? <ChevronUp size={13} aria-hidden="true"/> : <ChevronDown size={13} aria-hidden="true"/>)}
         </button>;
+        if (column.id === 'number') return <span key="number" className="column-cell column-number" data-numeric>{button}</span>;
         if (column.id === 'title') return <span key="title" className="select-visible column-cell">
           <input ref={selectAll} aria-label="Select all visible tracks" title="Select all tracks shown" type="checkbox" checked={visible.length > 0 && selected.length === visible.length}
             onChange={event => { const shown = new Set(visible.map(track => track.id)); onSelectedIds(ids => event.target.checked ? [...new Set([...ids, ...shown])] : ids.filter(id => !shown.has(id))); }}/>
-          {button}</span>;
+          {button}<ColumnResizer id="title" label={column.label} width={columns.widths.title} onWidth={columns.setWidth}/></span>;
         return <span key={column.id} className={`column-cell column-${column.id} ${column.id === 'artist' ? 'track-artist' : ''}`} data-numeric={column.numeric || undefined}>
-          <ColumnResizer id={column.id} label={column.label} width={columns.widths[column.id]} onWidth={columns.setWidth}/>{button}</span>;
+          {button}<ColumnResizer id={column.id} label={column.label} width={columns.widths[column.id]} onWidth={columns.setWidth}/></span>;
       })}
       <span className="visually-hidden">Actions</span>
     </div>
-    {visible.length ? visible.map(track => <TrackRow key={track.id} track={track} order={playlist ? playlist.track_ids.indexOf(track.id) + 1 : null}
-      selected={selectedSet.has(track.id)} active={activeId === track.id} playing={playing} first={playlist?.track_ids[0] === track.id} last={playlist?.track_ids.at(-1) === track.id}
-      ordering={ordering} sorted={!!sort} dropTarget={reorder.target === track.id} handlers={handlers}/>) : loading ? <div className="empty" role="status"><p>Loading your library…</p></div> : <div className="empty">
+    {visible.length ? visible.map(track => <React.Fragment key={track.id}>
+      <TrackRow track={track} order={playlist ? playlist.track_ids.indexOf(track.id) + 1 : null} position={positions.get(track.id) ?? 0}
+        selected={selectedSet.has(track.id)} active={activeId === track.id} playing={playing} first={playlist?.track_ids[0] === track.id} last={playlist?.track_ids.at(-1) === track.id}
+        ordering={ordering} sorted={!!sort} dropTarget={reorder.target === track.id} handlers={handlers}/>
+      {/* The track in the player shows its waveform under its row; clicking it plays from there. */}
+      {activeTrack?.id === track.id && !activeTrack.missing && (activeTrack.analysis || activeDetail) && <div className="track-row-wave" data-playing={playing || undefined}>
+        <Overview track={activeTrack} detail={activeDetail} onSeek={onSeek} label={`Waveform of ${activeTrack.title}`}/>
+      </div>}
+    </React.Fragment>) : loading ? <div className="empty" role="status"><p>Loading your library…</p></div> : <div className="empty">
       <div className="empty-icon"><FolderOpen size={27}/></div>
       <h2>{query.trim() ? 'No matching tracks' : filter === 'missing' ? 'No missing files' : filter === 'unwritten' ? 'No unwritten tag changes' : playlist ? 'This playlist is empty' : 'Your library starts here'}</h2>
       <p>{query.trim() ? 'Try a different search.' : filter === 'missing' ? 'Every audio file is where CrateLoom expects it.' : filter === 'unwritten' ? 'All saved metadata has been written to the audio files.'
-        : playlist ? 'In All Tracks, tick the tracks you want and choose Add to playlist.' : 'Add audio files or a folder to prepare them for your next set.'}</p>
+        : playlist ? 'Choose Add music › From your library, or right-click a track in All Tracks and choose Add to playlist.' : 'Add audio files or a folder to prepare them for your next set.'}</p>
       {!query.trim() && !playlist && filter === 'all' && <button disabled={importing} onClick={actions.importFiles}><Plus size={16}/> Add music</button>}
     </div>}
-    {context && <ContextMenu x={context.x} y={context.y} label={`Actions for ${context.track.title}`} onClose={closeContext} items={[
-      {label: 'Copy title', icon: <Copy size={14}/>, disabled: !context.track.title.trim(), onSelect: () => copy(context.track.title)},
-      {label: 'Copy artist', icon: <Copy size={14}/>, disabled: !context.track.artist.trim(), onSelect: () => copy(context.track.artist)},
-      {label: 'Copy artist and title', icon: <Copy size={14}/>, disabled: !context.track.artist.trim() || !context.track.title.trim(),
-        onSelect: () => copy(`${context.track.artist} - ${context.track.title}`)},
-      'separator',
-      {label: 'Reveal in Finder', icon: <FolderSearch size={14}/>, disabled: context.track.missing, onSelect: () => run(actions.reveal(context.track))},
-    ]}/>}
     <PanelPresence open={!!confirm}>{confirm && (confirm.kind === 'playlist'
       ? <ConfirmDialog title={`Delete playlist “${playlist?.name || ''}”?`} confirmLabel="Delete playlist" busy={confirmBusy} error={confirmError} onConfirm={() => void runConfirm()} onCancel={closeConfirm}>
           <p>Only the playlist is deleted. {playlist?.track_ids.length ? `Its ${plural(playlist.track_ids.length, 'track')} ${playlist.track_ids.length === 1 ? 'stays' : 'stay'} in your library, and no audio files are deleted.` : 'No tracks or audio files are deleted.'}</p>
@@ -288,11 +281,10 @@ export function LibraryView({tracks, playlists, playlist, query, filter, onFilte
 }
 
 /**
- * The drag handle on a column's left edge. Title takes the remaining width, so dragging the
- * edge left widens this column and the edge follows the pointer. Double-click resets it;
- * arrow keys resize in 8px steps.
+ * The drag handle on a column's right edge: dragging it right widens this column, and the columns
+ * after it move along. Double-click resets it; arrow keys resize in 8px steps.
  */
-function ColumnResizer({id, label, width, onWidth}: {id: Exclude<ColumnId, 'title'>; label: string; width: number | undefined; onWidth: (id: Exclude<ColumnId, 'title'>, value: number | null) => void}) {
+function ColumnResizer({id, label, width, onWidth}: {id: Resizable; label: string; width: number | undefined; onWidth: (id: Resizable, value: number | null) => void}) {
   const handle = useRef<HTMLSpanElement>(null);
   const measured = () => width ?? handle.current?.parentElement?.getBoundingClientRect().width ?? WIDTH_LIMITS[id].min;
   return <span ref={handle} className="column-resizer" role="separator" aria-orientation="vertical" tabIndex={0}
@@ -304,7 +296,7 @@ function ColumnResizer({id, label, width, onWidth}: {id: Exclude<ColumnId, 'titl
       const start = event.clientX, from = measured(), target = event.currentTarget;
       target.setPointerCapture(event.pointerId);
       document.body.dataset.resizingColumn = 'true';
-      const moved = (move: PointerEvent) => onWidth(id, clampWidth(id, from + start - move.clientX));
+      const moved = (move: PointerEvent) => onWidth(id, clampWidth(id, from + move.clientX - start));
       const done = () => { target.removeEventListener('pointermove', moved); delete document.body.dataset.resizingColumn; };
       target.addEventListener('pointermove', moved);
       target.addEventListener('pointerup', done, {once: true});
@@ -312,7 +304,7 @@ function ColumnResizer({id, label, width, onWidth}: {id: Exclude<ColumnId, 'titl
     }}
     onDoubleClick={() => onWidth(id, null)}
     onKeyDown={event => {
-      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onWidth(id, measured() + (event.key === 'ArrowLeft' ? 8 : -8)); }
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') { event.preventDefault(); onWidth(id, measured() + (event.key === 'ArrowRight' ? 8 : -8)); }
       else if (event.key === 'Home' || event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); onWidth(id, null); }
     }}/>;
 }

@@ -48,10 +48,11 @@ function Clock({duration}: {duration: number}) {
   return <span className="time editor-clock" aria-label="Position">{time(second)} / {time(duration)}</span>;
 }
 
-function Overview({track, detail, loop, tempCue, onSeek}: {track: Track; detail: AnalysisData | null; loop: Loop | null; tempCue: number; onSeek: (seconds: number) => void}) {
+/** The whole track: waveform, sections, cues and the playhead. Clicking or arrow keys seek. Also shown under the playing row in the track list. */
+export function Overview({track, detail, loop = null, tempCue, onSeek, label = 'Full track overview'}: {track: Track; detail: AnalysisData | null; loop?: Loop | null; tempCue?: number; onSeek: (seconds: number) => void; label?: string}) {
   const position = usePlayhead();
   const percent = (seconds: number) => `${seconds / track.duration * 100}%`;
-  return <div className="overview" role="slider" tabIndex={0} aria-label="Full track overview" aria-valuemin={0} aria-valuemax={Math.round(track.duration)} aria-valuenow={Math.round(position)} aria-valuetext={`${time(position)} of ${time(track.duration)}`}
+  return <div className="overview" role="slider" tabIndex={0} aria-label={label} aria-valuemin={0} aria-valuemax={Math.round(track.duration)} aria-valuenow={Math.round(position)} aria-valuetext={`${time(position)} of ${time(track.duration)}`}
     onClick={event => onSeek((event.clientX - event.currentTarget.getBoundingClientRect().left) / event.currentTarget.clientWidth * track.duration)}
     onKeyDown={event => { if (event.key === 'ArrowRight' || event.key === 'ArrowLeft') { event.preventDefault(); onSeek(playhead.get() + (event.key === 'ArrowRight' ? 5 : -5)); } }}>
     <WaveBars data={detail} fallback={track.analysis?.peaks || emptyPeaks} start={0} length={track.duration} duration={track.duration} overview/>
@@ -59,7 +60,7 @@ function Overview({track, detail, loop, tempCue, onSeek}: {track: Track; detail:
       style={{left: percent(section.start_us / 1e6), width: percent((section.end_us - section.start_us) / 1e6), background: sectionColors[section.label] || sectionColors.Other}}>{section.label}</div>)}
     {loop && <div className="loop-band" style={{left: percent(loop.start), width: percent(loop.end - loop.start)}}/>}
     {track.cues.map(cue => <span className="overview-cue" key={cue.slot} style={{left: percent(cue.position_us / 1e6), background: cue.color || cueColors[cue.slot]}}>{slotName(cue.slot)}</span>)}
-    <span className="temp-cue-arrow" aria-hidden="true" style={{left: percent(tempCue)}}/>
+    {tempCue !== undefined && <span className="temp-cue-arrow" aria-hidden="true" style={{left: percent(tempCue)}}/>}
     <div className="playhead" style={{left: percent(position)}}/>
   </div>;
 }

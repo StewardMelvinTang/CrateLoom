@@ -207,6 +207,67 @@ class SetImport(unittest.TestCase):
         self.assertEqual(source['values']['title'], 'All That Matters (Decemberkid Edit)')
         self.assertTrue(resolve.call_args.args[1][1].endswith(right['id']))
 
+    def test_playlist_music_video_is_swapped_for_the_audio_only_upload(self):
+        mv_id, topic_id, audio_id = 'MVxxxxxxxx1', 'TOPICxxxxx1', 'AUDIOxxxxx1'
+        topic = {'id':topic_id,'title':"Ain't No Way (You Won't Love Me)",'channel':'Chris Brown - Topic','duration':203}
+        audio = {'id':audio_id,'title':"Chris Brown - Ain't No Way (Official Audio)",'channel':'ChrisBrownVEVO','duration':204}
+        listed_video = {'id':mv_id,'title':"Chris Brown - Ain't No Way (Official Video)",'channel':'ChrisBrownVEVO','duration':251}
+        def resolved(raw_title, duration, topic_upload=False):
+            return {'kind':'direct','duration':duration,'raw_title':raw_title,'topic':topic_upload,'values':{'title':"Ain't No Way",'artist':''}}
+        def run(listed, results):
+            row = playlist_sources.entry("Ain't No Way", 'Chris Brown', 'YouTube Music', 'https://music.youtube.com/watch?v='+mv_id, listed['duration'])
+            pages = {mv_id: resolved(listed['raw_title'], listed['duration'], listed.get('topic', False)),
+                     topic_id: resolved(topic['title'], topic['duration'], True), audio_id: resolved(audio['title'], audio['duration'])}
+            def resolve(engine, reference, *args, **kwargs):
+                vid = reference[2][-11:]
+                return dict(pages[vid], url='https://www.youtube.com/watch?v='+vid), None, {}
+            with patch.object(set_import.youtube_audio, 'resolve', side_effect=resolve) as resolver, \
+                 patch.object(set_import.youtube_audio, 'search', return_value=results) as search:
+                source, error = set_import.source_for(api, row, None)
+            self.assertIsNone(error)
+            return providers.CANDIDATES[source['source_id']]['value']['url'][-11:], row, search, resolver
+
+        # Labelled a music video: the Topic upload is used, and the video stays linked.
+        used, row, _, _ = run({'raw_title':listed_video['title'],'duration':251}, [listed_video, audio, topic])
+        self.assertEqual(used, topic_id)
+        self.assertEqual(row['music_video_skipped'], 'https://music.youtube.com/watch?v='+mv_id)
+        self.assertEqual(row['links'], [{'label':'YouTube Music','url':'https://music.youtube.com/watch?v='+mv_id}])
+        # Unlabelled but 48 s longer than the song: still a music video.
+        used, _, _, _ = run({'raw_title':"Chris Brown - Ain't No Way",'duration':251}, [listed_video, topic])
+        self.assertEqual(used, topic_id)
+        # Without a Topic upload an "Official Audio" upload does.
+        used, _, _, _ = run({'raw_title':listed_video['title'],'duration':251}, [listed_video, audio])
+        self.assertEqual(used, audio_id)
+        # The same length as the song: the linked video is kept.
+        used, _, _, resolver = run({'raw_title':"Chris Brown - Ain't No Way",'duration':205}, [topic])
+        self.assertEqual((used, resolver.call_count), (mv_id, 1))
+        # Already the audio-only upload: no search at all.
+        used, _, search, _ = run({'raw_title':"Ain't No Way",'duration':203,'topic':True}, [topic])
+        self.assertEqual(used, mv_id)
+        search.assert_not_called()
+        # No audio upload found: the linked video is kept rather than guessing.
+        used, _, search, _ = run({'raw_title':listed_video['title'],'duration':251}, [listed_video])
+        self.assertEqual(used, mv_id)
+        # ... after one more search aimed at the audio upload.
+        self.assertEqual([call.args[1] for call in search.call_args_list], ["Chris Brown Ain't No Way", "Chris Brown Ain't No Way audio"])
+
+    def test_audio_only_uploads_rank_above_music_videos(self):
+        row = playlist_sources.entry('Video Games', 'Lana Del Rey', 'Spotify', None, 282)
+        row['source_options'] = [
+            {'title':'Lana Del Rey - Video Games (Official Music Video)','url':'https://www.youtube.com/watch?v=aaaaaaaaaaa','duration':290,'verified':True},
+            {'title':'Video Games','url':'https://www.youtube.com/watch?v=bbbbbbbbbbb','duration':282,'topic':True},
+            {'title':'Lana Del Rey - Video Games','url':'https://www.youtube.com/watch?v=ccccccccccc','duration':282,'verified':True}]
+        best = set_import.recommend_sources(row)
+        self.assertEqual((best['url'][-11:], best['recommendation_reason']), ('bbbbbbbbbbb', 'Audio-only upload'))
+        # A song named "Video Games" is not a music video, and a lyric video carries the song's audio.
+        self.assertFalse(set_import.music_video('Lana Del Rey - Video Games', 'Video Games'))
+        self.assertFalse(set_import.music_video('Song (Official Lyric Video)', 'Song'))
+        self.assertTrue(set_import.music_video('Song (Official Video)', 'Song'))
+        self.assertTrue(set_import.music_video('[MV] Song', 'Song'))
+        self.assertTrue(set_import.music_video('Song M/V', 'Song'))
+        # A catalog length stands in for a missing listed one.
+        self.assertEqual(set_import.expected_length({'duration':None,'catalog_duration':203}), 203)
+
     def test_shazam_windows_merge_adjacent_results_and_keep_gaps(self):
         stream = io.BytesIO(b'\0' * shazam_worker.RATE * 2 * 28)
         hits = []
@@ -832,6 +893,8 @@ class SetImport(unittest.TestCase):
         self.assertEqual({field:progress[field] for field in ('unit','completed','position','duration','tracks_found')},
                          {'unit':'samples','completed':4,'position':391,'duration':6730,'tracks_found':2})
         self.assertGreater(progress['resume_at'],time.time()+80)
+        # The status line under the scan reads the same reach, not the batch's 0:00 offset.
+        self.assertEqual(api.dispatch('sets.get',{'id':sid})['scan']['sampled_until'],391)
         # A pass that has not sampled yet still reports its place in seconds.
         self.assertEqual(set_import.waiting_progress({'offset':120,'duration':600},'Waiting for Shazam',1)['unit'],'seconds')
 

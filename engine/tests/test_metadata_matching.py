@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from crateloom.metadata_matching import clean_name, search_identity, catalog_identity, query_plan, rank_candidates, split_version, primary_artist
+from crateloom.metadata_matching import identity_layers, title_similarity, clean_name, search_identity, catalog_identity, query_plan, rank_candidates, split_version, primary_artist
 from crateloom import preparation, metadata_lookup
 
 
@@ -250,6 +250,31 @@ class MetadataMatching(unittest.TestCase):
         # The full credit still scores a band name correctly even though retrieval uses its first word.
         ranked = rank_candidates({'recordings': [recording('ewf', 'September', 'Earth, Wind & Fire', 215)]}, 215, search_identity('September', 'Earth, Wind & Fire'))
         self.assertEqual(ranked[0]['match_status'], 'strong')
+
+    def test_a_bracketed_alternative_name_on_one_side_still_matches(self):
+        identity = catalog_identity("Ain't No Way", 'Chris Brown')
+        ranked = rank_candidates({'recordings': [recording('cb', 'Ain’t No Way (You Won’t Love Me)', 'Chris Brown', 203),
+                                                 recording('cb2', "Ain't No Way (Part 2)", 'Chris Brown', 203),
+                                                 recording('cb3', "Ain't No Way (Interlude)", 'Chris Brown', 203)]}, 203, identity)
+        by_id = {c['recording_id']: c for c in ranked}
+        self.assertEqual((by_id['cb']['match_status'], by_id['cb']['title_similarity']), ('strong', .96))
+        # A part or an interlude is a different recording, not an alternative name.
+        for other in ('cb2', 'cb3'):
+            self.assertNotEqual(by_id[other]['match_status'], 'strong')
+            self.assertLess(by_id[other]['title_similarity'], .9)
+        self.assertEqual(title_similarity('Ain’t No Way (You Won’t Love Me)', "Aint No Way"), .96)
+        self.assertEqual(title_similarity('Hold On - Radio Version Two', 'Hold On'), .93)
+        self.assertEqual(clean_name('Song (Explicit) [Official Video]'), 'Song')
+
+    def test_search_layers_try_the_exchanged_and_shorter_readings(self):
+        layers = [(identity['title'], identity['artist'], note) for identity, note in identity_layers('Chris Brown', "2 . Ain't No Way (You Won't Love Me)")]
+        self.assertEqual(layers[:2], [('Chris Brown', "Ain't No Way (You Won't Love Me)", ''),
+                                      ("Ain't No Way (You Won't Love Me)", 'Chris Brown', 'title and artist exchanged')])
+        self.assertIn(("Ain't No Way", 'Chris Brown', 'title and artist exchanged, without the name in brackets'), layers)
+        # An "Artist - Song" title with an uploader in the artist field.
+        layers = [(identity['title'], identity['artist']) for identity, _ in identity_layers('Chris Brown - Yeah 3x', 'LyricsVault', loose=True)]
+        self.assertIn(('Yeah 3x', 'Chris Brown'), layers)
+        self.assertEqual(layers[-1], ('Chris Brown - Yeah 3x', ''))
 
 
 if __name__ == '__main__': unittest.main()

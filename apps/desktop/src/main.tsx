@@ -2,13 +2,16 @@ import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {createRoot, type Root} from 'react-dom/client';
 import {convertFileSrc} from '@tauri-apps/api/core';
 import {open, save} from '@tauri-apps/plugin-dialog';
-import {Activity, ArrowLeft, Check, Download, FolderOpen, ListMusic, LoaderCircle, Plus, Search, X} from 'lucide-react';
+import {Activity, ArrowLeft, Check, Download, FolderOpen, HardDrive, ListMusic, LoaderCircle, Plus, Search, X} from 'lucide-react';
 import './style.css';
 import './workspace.css';
 import {call, message} from './engine';
 import {Sidebar} from './Sidebar';
 import {Titlebar} from './Titlebar';
 import {PanelPresence, transitionWorkspace} from './PanelMotion';
+import {STORAGE_NOTICE, StorageGate, StorageSettings} from './StorageSettings';
+import {TrackMenu, type TrackMenuRequest} from './TrackMenu';
+import {AddFromLibrary} from './AddFromLibrary';
 import {Disclosure} from './Disclosure';
 import {Select} from './Select';
 import {Menu} from './Menu';
@@ -20,6 +23,7 @@ import {TagWriteReview} from './TagWriteReview';
 import {DiscoveryPanel, type AcquisitionJob, type AcquisitionReview} from './DiscoveryPanel';
 import {Downloads, activeDownloads} from './Downloads';
 import {SetImportPanel} from './SetImportPanel';
+import {ChangeSource} from './ChangeSource';
 import {LibraryView, type ExportSelector, type LibraryFilter} from './LibraryView';
 import {CueEditor, type EditorActions, type Loop} from './CueEditor';
 import {PlayerBar, type RepeatMode} from './PlayerBar';
@@ -55,6 +59,12 @@ function App() {
     if (tone === 'info') window.setTimeout(() => dismissNotice(id), 8000);
   }, [dismissNotice]);
   const fail = useCallback((error: unknown, prefix = '') => notify(prefix + message(error)), [notify]);
+  // After the library moved, the window reloads on the new location and says so once.
+  useEffect(() => {
+    let text: string | null = null;
+    try { text = sessionStorage.getItem(STORAGE_NOTICE); sessionStorage.removeItem(STORAGE_NOTICE); } catch { /* no notice */ }
+    if (text) notify(text, 'info');
+  }, [notify]);
 
   // Library
   const [tracks, setTracks] = useState<Track[]>([]);
@@ -67,6 +77,12 @@ function App() {
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>('all');
   const [query, setQuery] = useState('');
   const [metadataIds, setMetadataIds] = useState<string[] | null>(null);
+  const [changeSourceTrack, setChangeSourceTrack] = useState<Track | null>(null);
+  const [storageOpen, setStorageOpen] = useState(false);
+  const [trackMenu, setTrackMenu] = useState<TrackMenuRequest | null>(null);
+  const [addFromLibrary, setAddFromLibrary] = useState(false);
+  /** The playlist that files being imported are also added to, when the import started in a playlist. */
+  const importPlaylist = useRef<string | null>(null);
   const [tagWriteIds, setTagWriteIds] = useState<string[] | null>(null);
   const [ordering, setOrdering] = useState(false);
   const orderingLock = useRef(false), orderRevision = useRef(0);
@@ -453,6 +469,8 @@ function App() {
       const results = await Promise.allSettled(completed.map(item => call<Track>('track.get', {id: item.track_id})));
       const ids: string[] = [];
       results.forEach((result, i) => {
+        // A changed source gives the playing track new audio; the player follows it.
+        if (result.status === 'fulfilled' && activeId.current === result.value.id && result.value.path !== activeRef.current?.path) { pauseAudio(); playhead.set(0); setLoop(null); setActive(result.value); }
         if (result.status === 'fulfilled') { if (!handledSetAnalysis.current.has(result.value.id) && needsAnalysis(result.value, analysisVersionRef.current)) ids.push(result.value.id); }
         else { handledAcquisitions.current.delete(completed[i].id); setAcquisitionError(message(result.reason)); }
       });
@@ -489,7 +507,10 @@ function App() {
         failures = 0; cursor = next.cursor; setImportError('');
         if (next.items.length) setImportItems(items => [...items, ...next.items]);
         setBatch(next);
-        if (next.items.length) { await refresh().catch(() => {}); if (autoImport.current) queueImported(next.items); }
+        if (next.items.length) {
+          if (importPlaylist.current) await addImportedToPlaylist(importPlaylist.current, next.items).catch(error => fail(error, 'The imported tracks could not be added to the playlist: '));
+          await refresh().catch(() => {}); if (autoImport.current) queueImported(next.items);
+        }
         done = !importActive(next) && next.cursor >= next.processed;
       } catch (error) { if (stopped) return; failures++; setImportError(message(error)); }
       if (!stopped && !done) timer = window.setTimeout(poll, failures ? Math.min(8000, 500 * 2 ** failures) : 500);
@@ -498,31 +519,44 @@ function App() {
     return () => { stopped = true; window.clearTimeout(timer); };
   }, [batchId]);
   const dismissImport = () => { if (batch) localStorage.setItem('importDismissed', batch.id); setBatch(null); setImportItems([]); setImportError(''); };
-  const startBatch = async (params: object) => {
-    const next = await call<ImportJob>('imports.start', params);
-    autoImport.current = true; setImportError(''); setImportItems(next.items); setBatch(next);
-    showLibrary();
-    if (next.items.length) { await refresh(); queueImported(next.items); }
+  // Imported and already-known tracks both join the playlist the import was started from.
+  const addImportedToPlaylist = async (target: string, items: ImportItem[]) => {
+    const ids = items.filter(item => item.track_id && (item.state === 'imported' || item.state === 'duplicate')).map(item => item.track_id!);
+    if (!ids.length) return;
+    const playlist = (await call<Playlist[]>('playlists.list')).find(item => item.id === target);
+    const added = playlist ? ids.filter(id => !playlist.track_ids.includes(id)) : [];
+    if (playlist && added.length) await call<Playlist>('playlists.save', {id: playlist.id, name: playlist.name, track_ids: [...playlist.track_ids, ...added]});
   };
-  const importFolder = async () => {
+  const startBatch = async (params: object, target: string | null = null) => {
+    const next = await call<ImportJob>('imports.start', params);
+    importPlaylist.current = target;
+    autoImport.current = true; setImportError(''); setImportItems(next.items); setBatch(next);
+    showLibrary(target);
+    if (next.items.length) {
+      if (target) await addImportedToPlaylist(target, next.items).catch(error => fail(error, 'The imported tracks could not be added to the playlist: '));
+      await refresh(); queueImported(next.items);
+    }
+  };
+  const importFolder = async (target: string | null = null) => {
     if (importing || batchRunning) return;
-    try { const folder = await open({directory: true, multiple: false}); if (folder) await startBatch({folder}); }
+    try { const folder = await open({directory: true, multiple: false}); if (folder) await startBatch({folder}, target); }
     catch (error) { fail(error, 'The folder could not be imported: '); }
   };
-  const importFiles = async () => {
+  const importFiles = async (target: string | null = null) => {
     if (editLock.current || importing || batchRunning) return;
     try {
       const chosen = await open({multiple: true, filters: [{name: 'Audio', extensions: AUDIO_EXTENSIONS}]});
       if (!chosen) return;
       const paths = Array.isArray(chosen) ? chosen : [chosen];
-      if (paths.length > 1) { await startBatch({paths}); return; }
+      if (paths.length > 1) { await startBatch({paths}, target); return; }
       setImporting(true);
       const track = await call<Track & {duplicate?: boolean}>('library.import', {path: paths[0]});
       if (track.duplicate) notify(track.missing ? 'This audio is already in your library, but its file is missing. Use Relink to locate it.' : 'This audio is already in your library.', 'info');
+      if (target) await addImportedToPlaylist(target, [{sequence: 0, path: paths[0], state: track.duplicate ? 'duplicate' : 'imported', track_id: track.id, error: null}]);
       await refresh();
       // Select directly: the import already returned the track and granted asset access.
       ++selection.current; activeId.current = track.id;
-      leaveEditor(() => { setWorkspace('library'); setPlaylistId(null); setActive(track); resetEditing(); playhead.set(0); setLoop(null); });
+      leaveEditor(() => { setWorkspace('library'); setPlaylistId(target); setActive(track); resetEditing(); playhead.set(0); setLoop(null); });
     } catch (error) { fail(error, 'The file could not be added: '); }
     finally { setImporting(false); }
   };
@@ -579,16 +613,30 @@ function App() {
     await refresh();
     notify(`Deleted the playlist “${name}”. Its tracks are still in your library.`, 'info');
   };
-  const removeFromLibrary = async (ids: string[]) => {
-    const result = await call<{removed: number}>('library.remove', {ids});
+  /** Let go of tracks that are no longer in the library: the player, the selection and the analysis queues. */
+  const forgetTracks = (ids: string[]) => {
     if (activeId.current && ids.includes(activeId.current)) {
       ++selection.current; pendingPlayback.current = null; pauseAudio(); activeId.current = null;
       setActive(null); setLoop(null); playhead.set(0); resetEditing();
     }
     setSelectedIds(selected => selected.filter(id => !ids.includes(id)));
     setAutoQueue(queue => queue.filter(id => !ids.includes(id))); setStructureQueue(queue => queue.filter(id => !ids.includes(id)));
+  };
+  const removeFromLibrary = async (ids: string[]) => {
+    const result = await call<{removed: number}>('library.remove', {ids});
+    forgetTracks(ids);
     await refresh();
     notify(`Removed ${plural(result.removed, 'track')} from the library. ${result.removed === 1 ? 'The audio file was' : 'The audio files were'} not deleted.`, 'info');
+  };
+  const trashTracks = async (ids: string[]) => {
+    // Pause first, so a playing file is not held open while it moves to the Trash.
+    if (activeId.current && ids.includes(activeId.current)) pauseAudio();
+    const result = await call<{removed: number; trashed: number; not_trashed: string[]}>('library.trash', {ids});
+    forgetTracks(ids);
+    await refresh();
+    const kept = result.not_trashed.length ? ` ${plural(result.not_trashed.length, 'file')} could not be moved and ${result.not_trashed.length === 1 ? 'stays' : 'stay'} in the library.` : '';
+    notify(result.trashed ? `Moved ${plural(result.trashed, 'file')} to the Trash and removed ${result.removed === 1 ? 'the track' : `${result.removed} tracks`} from the library.${kept}`
+      : `Removed ${plural(result.removed, 'track')} from the library; ${result.removed === 1 ? 'its file was' : 'their files were'} already missing.${kept}`, 'info');
   };
   const movePlaylistTrack = (id: string, direction: number) => {
     if (!currentPlaylist) return;
@@ -698,7 +746,7 @@ function App() {
     if (event.defaultPrevented || typingTarget(event)) return;
     const command = event.metaKey || event.ctrlKey, key = event.key.toLowerCase();
     if (command && key === 'f' && search.current) { event.preventDefault(); search.current.focus(); search.current.select(); }
-    else if (command && key === 'o') { event.preventDefault(); void importFiles(); }
+    else if (command && key === 'o') { event.preventDefault(); void importFiles(!editor && workspace === 'library' ? playlistId : null); }
     // Space is always play/pause, as in other music apps, even after clicking a button such as a cue pad
     // (Enter still presses the focused button). Text fields, menus and dialogs keep their own Space.
     else if (event.code === 'Space' && !command && !event.altKey) { event.preventDefault(); if (!event.repeat) toggle(); }
@@ -751,7 +799,7 @@ function App() {
           <button aria-label="Create playlist" title="Create an empty playlist with this name" disabled={!newPlaylistName.trim()}><Plus size={14}/></button>
         </form>
       </div>
-      <div className="sidebar-bottom"><label htmlFor="appearance">Appearance</label><Select id="appearance" value={theme} onChange={event => setTheme(event.target.value)}><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></Select></div>
+      <div className="sidebar-bottom"><button type="button" className="storage-open" onClick={() => setStorageOpen(true)}><HardDrive size={14}/> Library location…</button><label htmlFor="appearance">Appearance</label><Select id="appearance" value={theme} onChange={event => setTheme(event.target.value)}><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></Select></div>
     </Sidebar>
     <main>
       <header>
@@ -766,11 +814,17 @@ function App() {
           {!editor && workspace === 'library' && <label className="search" title="Search by title or artist (⌘F)"><Search size={16}/><input ref={search} type="search" aria-label="Search tracks" placeholder="Search tracks" value={query} onChange={event => setQuery(event.target.value)}/></label>}
           <button className="toolbar-download" title={runningDownloads ? `Downloads: ${runningDownloads} in progress` : 'Downloads'} aria-label={runningDownloads ? `Downloads, ${runningDownloads} in progress` : 'Downloads'}
             aria-haspopup="dialog" aria-expanded={downloadsOpen} onClick={() => { setDownloadsOpen(true); void refreshAcquisitions().catch(() => {}); }}>
-            <Download size={16}/><span className="toolbar-label">Downloads</span>{runningDownloads > 0 && <span className="count-badge">{runningDownloads}</span>}</button>
-          <Menu label={importing ? 'Adding…' : 'Add music'} ariaLabel="Add music" icon={<Plus size={16}/>} buttonClassName="primary" align="end" title="Add audio files or a folder to the library" disabled={importing || batchRunning} items={[
-            {label: 'Files…', description: 'Choose one or more audio files.', hint: '⌘O', onSelect: () => void importFiles()},
-            {label: 'Folder…', description: 'Add every audio file in a folder.', onSelect: () => void importFolder()},
-          ]}/>
+            <Download size={16}/>{runningDownloads > 0 && <span className="count-badge">{runningDownloads}</span>}</button>
+          {currentPlaylist && !editor && workspace === 'library'
+            ? <Menu label={importing ? 'Adding…' : 'Add music'} ariaLabel="Add music" icon={<Plus size={16}/>} buttonClassName="primary" align="end" title={`Add tracks to “${currentPlaylist.name}”`} disabled={importing || batchRunning} items={[
+                {label: 'From your library…', description: 'Pick tracks you already have.', onSelect: () => setAddFromLibrary(true)},
+                {label: 'Files…', description: 'Add audio files to your library and this playlist.', hint: '⌘O', onSelect: () => void importFiles(currentPlaylist.id)},
+                {label: 'Folder…', description: 'Add every audio file in a folder to your library and this playlist.', onSelect: () => void importFolder(currentPlaylist.id)},
+              ]}/>
+            : <Menu label={importing ? 'Adding…' : 'Add music'} ariaLabel="Add music" icon={<Plus size={16}/>} buttonClassName="primary" align="end" title="Add audio files or a folder to the library" disabled={importing || batchRunning} items={[
+                {label: 'Files…', description: 'Choose one or more audio files.', hint: '⌘O', onSelect: () => void importFiles()},
+                {label: 'Folder…', description: 'Add every audio file in a folder.', onSelect: () => void importFolder()},
+              ]}/>}
         </div>
       </header>
       <div className="status-stack">
@@ -816,7 +870,7 @@ function App() {
           onOpen={async id => { await choose({id}, true); }}/>
       </div>}
       {!editor && workspace === 'library' && <LibraryView tracks={tracks} playlists={playlists} playlist={currentPlaylist} query={query} filter={libraryFilter} onFilter={setLibraryFilter} sort={trackSort.sort} onSort={trackSort.cycle}
-        loading={!libraryLoaded} selectedIds={selectedIds} onSelectedIds={setSelectedIds} activeId={active?.id ?? null} playing={playing} ordering={ordering} reorder={playlistReorder} exporting={exporting} importing={importing || batchRunning}
+        loading={!libraryLoaded} selectedIds={selectedIds} onSelectedIds={setSelectedIds} activeId={active?.id ?? null} activeTrack={active} activeDetail={detail} onSeek={seconds => seek(seconds, true)} playing={playing} ordering={ordering} reorder={playlistReorder} exporting={exporting} importing={importing || batchRunning}
         metadataBatch={metadataBatch} unanalysed={unanalysed} actions={{
           analyze: queueAnalysis,
           select: track => void choose(track),
@@ -828,9 +882,29 @@ function App() {
           addToPlaylist, newPlaylist: newPlaylistFromSelection, removeFromPlaylist,
           renamePlaylist: () => setRenaming(true), deletePlaylist, removeFromLibrary,
           exportTracks: (selector, name, copyAudio) => void exportTracks(selector, name, copyAudio),
-          moveTrack: movePlaylistTrack, importFiles: () => void importFiles(),
-          reveal: async track => { await call('library.reveal', {id: track.id}); },
+          moveTrack: movePlaylistTrack, importFiles: () => void importFiles(playlistId),
+          openMenu: setTrackMenu,
         }}/>}
+      <TrackMenu request={trackMenu} playlists={playlists} playlist={!editor && workspace === 'library' ? currentPlaylist : null} activeId={active?.id ?? null} playing={playing}
+        onClose={() => setTrackMenu(null)} actions={{
+          togglePlay: track => { if (active?.id === track.id) toggle(); else void choose(track, false, true); },
+          edit: track => void choose(track, true),
+          openMetadata: setMetadataIds,
+          addToPlaylist, newPlaylist: newPlaylistFromSelection, removeFromPlaylist, removeFromLibrary, trash: trashTracks,
+          changeSource: setChangeSourceTrack,
+          reveal: async track => { await call('library.reveal', {id: track.id}); },
+          fail: error => fail(error),
+        }}/>
+      <PanelPresence open={addFromLibrary && !!currentPlaylist}>{addFromLibrary && currentPlaylist && <AddFromLibrary tracks={tracks} playlist={currentPlaylist}
+        onAdd={ids => addToPlaylist(currentPlaylist, ids)} onClose={() => setAddFromLibrary(false)}/>}</PanelPresence>
+      <PanelPresence open={!!changeSourceTrack}>{changeSourceTrack && <ChangeSource track={changeSourceTrack} onClose={() => setChangeSourceTrack(null)} onPreviewStart={pauseAudio}
+        onQueued={() => void refreshAcquisitions().catch(() => {})}
+        onReplaced={async (updated, previousDeleted) => {
+          if (activeId.current === updated.id) { pauseAudio(); playhead.set(0); setLoop(null); setActive(updated); }
+          await refresh(); queueAnalysis([updated.id]);
+          notify(`Audio replaced. Tempo, key and beat grid are being measured again${previousDeleted ? '; the previous download was deleted' : ''}.`, 'info');
+        }}/>}</PanelPresence>
+      <PanelPresence open={storageOpen}>{storageOpen && <StorageSettings onClose={() => setStorageOpen(false)}/>}</PanelPresence>
       <PanelPresence open={!!tagWriteIds}>{tagWriteIds && <TagWriteReview ids={tagWriteIds} onClose={() => setTagWriteIds(null)} onSaved={refresh}/>}</PanelPresence>
       <PanelPresence open={!!metadataIds}>{metadataIds && <MetadataEditor key={metadataIds.join(',')} ids={metadataIds} onClose={() => setMetadataIds(null)}
         onSaved={async () => { await refresh(); if (activeId.current) { const updated = await call<Track>('track.get', {id: activeId.current}); setActive(current => current?.id === updated.id ? updated : current); } }}/>}</PanelPresence>
@@ -852,7 +926,7 @@ function App() {
         canPlay={(!!active && !active.missing) || playbackOrder.length > 0} hasPrevious={(!!active && !active.missing) || !!adjacentTrack(-1)} hasNext={!!adjacentTrack(1)}
         shuffle={shuffle} repeat={repeat} volume={volume} muted={muted} onEdit={openEditor} onToggle={toggle} onPrevious={() => advancePlayback(-1)} onNext={() => advancePlayback(1)}
         onShuffle={() => { shuffleAnchor.current = active?.id ?? null; setShuffle(!shuffle); }} onRepeat={() => setRepeat(repeat === 'off' ? 'all' : repeat === 'all' ? 'one' : 'off')}
-        onVolume={setVolume} onMuted={setMuted} onSeek={seek}/>}
+        onVolume={setVolume} onMuted={setMuted} onSeek={seek} onMenu={setTrackMenu}/>}
       <PanelPresence open={downloadsOpen}>{downloadsOpen && <Downloads jobs={acquisitions} error={acquisitionError} close={() => setDownloadsOpen(false)}
         clear={() => { void call('acquisitions.clear_completed').then(refreshAcquisitions).catch(error => setAcquisitionError(message(error))); }}
         cancel={id => { void cancelAcquisition(id).catch(error => setAcquisitionError(message(error))); }}
@@ -863,4 +937,4 @@ function App() {
 }
 // Reuse the root when the development server re-runs this module, so there is never a second App.
 const container = document.getElementById('root') as HTMLElement & {crateloomRoot?: Root};
-(container.crateloomRoot ??= createRoot(container)).render(<ErrorBoundary><App/></ErrorBoundary>);
+(container.crateloomRoot ??= createRoot(container)).render(<ErrorBoundary><StorageGate><App/></StorageGate></ErrorBoundary>);

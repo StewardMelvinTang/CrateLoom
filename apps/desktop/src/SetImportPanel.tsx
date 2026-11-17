@@ -26,7 +26,7 @@ type SetTrack = {
   recognized?: {at: number; played: number|null}; recognized_other?: {at: number; title: string; artist: string}[];
 };
 type SourceSearch = 'queued'|'searching'|'ready'|'choose'|'none'|'failed';
-type ReportScan = {offset: number|null; duration: number|null; retry_at: number; automatic: boolean; running: boolean; stalled: boolean; fast: boolean; samples: number; cancelling?: boolean; progress?: ScanProgressData; pending_matches?: number};
+type ReportScan = {offset: number|null; sampled_until?: number|null; duration: number|null; retry_at: number; automatic: boolean; running: boolean; stalled: boolean; fast: boolean; samples: number; cancelling?: boolean; progress?: ScanProgressData; pending_matches?: number};
 type Recognition = {state: 'none'|'running'|'paused'|'complete'|'failed'; confirmed: number; added: number; warning: string|null};
 type Heard = {at: number; end: number; title: string; artist: string; samples: number};
 type Report = {id: string; name: string; watch: string|null; playlist_id: string|null; warning: string|null; tracks: SetTrack[]; scan?: ReportScan;
@@ -617,7 +617,9 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
   // What the unfinished audio scan of the open report is doing, and what the user can do about it.
   const scanStatus = (current: ReportScan): {state: ScanState; label: string; stage: string} => {
     const now = Date.now() / 1000;
-    const position = `Checked up to ${timestamp(current.offset || 0)}${current.duration ? ` of ${timestamp(current.duration)}` : ''}.`;
+    // A sampled scan keeps its offset at the batch start, so its reach is the furthest sample taken.
+    const reach = current.sampled_until ?? current.offset ?? 0;
+    const position = `${current.sampled_until != null ? 'Sampled up to' : 'Checked up to'} ${timestamp(reach)}${current.duration ? ` of ${timestamp(current.duration)}` : ''}.`;
     if (current.running) return {state: 'running', label: recognizing ? `Recognizing audio · ${recognition!.confirmed} confirmed, ${recognition!.added} added` : 'Scanning audio', stage: current.progress?.stage || 'Recognizing the next section…'};
     if (current.automatic && current.retry_at > now + 15) return {state: 'waiting', label: 'Audio scan waiting', stage: /rate limit|limiting requests/i.test((recognizing ? recognition!.warning : report?.warning) || '')
       ? `Shazam is rate limiting; continues at ${clock(current.retry_at)}. ${position}`
@@ -792,7 +794,7 @@ export function SetImportPanel({hidden, activeTrackId, playing, onPlay, onUpdate
         // A recognition run keeps its own warning; the set's note is about the scan that published the entries.
         const scanText = recognizing ? recognition!.warning || '' : note;
         return <div className="set-scan-status"><ScanProgress label={status.label} state={status.state} cancelling={scan.cancelling}
-          progress={scan.progress && (scan.running || scan.progress.resume_at) ? scan.progress : {stage: status.stage, completed: scan.offset || 0, total: scan.duration, unit: 'steps'}}
+          progress={scan.progress && (scan.running || scan.progress.resume_at) ? scan.progress : {stage: status.stage, completed: scan.offset || 0, total: scan.sampled_until != null ? null : scan.duration, unit: 'steps'}}
           cancelLabel="Pause scan" onCancel={moving ? () => void run(async () => { const next = await call<Report>('sets.cancel_scan', {id: report.id}); if (mounted.current && reportRef.current?.id === next.id) setReport(next); }, setReportError) : undefined}>
           {/* Engine text (an OSError, a tool's output) becomes one sentence; the raw text sits under Details. */}
           {scanText && !(status.state === 'waiting' && /rate limit|limiting requests/i.test(scanText)) && <div className="scan-progress-detail">{isYoutubeAccessError(scanText) && !moving ? <ErrorText raw={scanText}/> : <>Last attempt: <ErrorText raw={scanText}/></>}</div>}

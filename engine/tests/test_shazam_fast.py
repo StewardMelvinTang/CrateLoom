@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 from types import SimpleNamespace
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -318,6 +319,16 @@ class WorkerPlumbingTests(unittest.TestCase):
             self.run_worker(runtime, plan={})
         with self.assertRaisesRegex(ValueError, '^Audio recognition stopped unexpectedly'):
             self.run_worker('print("not json")\n', plan={})
+
+    def test_sampled_worker_starts_from_its_saved_reach_not_zero(self):
+        # A sampled pass restarts at its batch start; before the worker reports, the scan says how far
+        # the saved samples reach instead of "0:00 of …".
+        published = []
+        control = SimpleNamespace(stop=threading.Event(), partial=None, check=lambda: None, publish=lambda stage, **fields: published.append((stage, fields)))
+        hit = {'key': '1', 'title': 'First', 'artist': 'Artist'}
+        with patch.object(shazam_scan.set_scan_jobs, 'current', return_value=control):
+            self.run_worker('sys.stdin.readline()\nprint(json.dumps({"hits":[]}))\n', plan={'samples': {'0': hit, '60': None, '150': hit}, 'serial': False})
+        self.assertEqual(published[0], ('Identifying tracks', {'completed': 3, 'total': None, 'unit': 'samples', 'position': 150, 'duration': 300.0, 'tracks_found': 1}))
 
     def test_rate_limit_failure_gets_engine_sentence_and_pacing_is_persisted(self):
         seen = self.root/'seen.json'

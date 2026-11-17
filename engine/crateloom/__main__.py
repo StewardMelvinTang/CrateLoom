@@ -23,11 +23,14 @@ from .fast_sections import VERSION as FAST_STRUCTURE_VERSION
 from .errors import public_error
 
 VERSION = '0.1.0'
-ROOT = Path(os.environ.get('CRATELOOM_DATA', Path.home() / '.crateloom'))
-ROOT.mkdir(parents=True, exist_ok=True)
+from . import storage
+# A chosen folder on a drive that is not connected is left alone; requests then explain what to connect.
+ROOT, STORAGE_SOURCE, STORAGE_AVAILABLE = storage.configured()
 DB = ROOT / 'library.sqlite3'
 CACHE = ROOT / 'analysis-cache'
-CACHE.mkdir(parents=True, exist_ok=True)
+if STORAGE_AVAILABLE:
+    ROOT.mkdir(parents=True, exist_ok=True)
+    CACHE.mkdir(parents=True, exist_ok=True)
 WORKERS = {}
 IMPORT_CONTEXT=threading.local()
 
@@ -408,25 +411,75 @@ def cache_key(t, kind='beat', fast=False):
     text = f"{t['audio_hash']}:{t['codec']}:{t['sample_rate']}:{t['duration']}:{version}:{ffmpeg_version}"
     return hashlib.sha256(text.encode()).hexdigest()
 
+TRASH = '/usr/bin/trash'
+
+def removable(db, ids):
+    """The existing tracks among ``ids``, once no live analysis is using any of them."""
+    chosen=set(ids)
+    for row in db.execute("SELECT id,track_id FROM jobs WHERE state IN ('queued','running')").fetchall():
+        # Settle a worker that already finished; only live analysis blocks removal.
+        if row['track_id'] in chosen and job_status(db,row['id'])['state'] in ('queued','running'):
+            raise ValueError('Analysis is still running for a selected track. Wait for it to finish or cancel it before removing the track.')
+    return [(i,) for i in dict.fromkeys(ids) if db.execute('SELECT 1 FROM tracks WHERE id=?',(i,)).fetchone()]
+
+def trash_files(db, keys):
+    """Move each track's own audio file to the Trash. A file that cannot be moved keeps its track."""
+    if sys.platform!='darwin' or not os.access(TRASH,os.X_OK): raise ValueError('Moving files to the Trash needs macOS 15 or later. Use Remove from library instead.')
+    kept,trashed,failed=[],0,[]
+    for key in keys:
+        path=db.execute('SELECT path FROM tracks WHERE id=?',key).fetchone()['path']
+        if not Path(path).is_file():
+            kept.append(key); continue  # already gone: only the library entry is left to remove
+        try:
+            subprocess.run([TRASH,str(Path(path).resolve())],check=True,capture_output=True,timeout=30)
+        except (subprocess.CalledProcessError,subprocess.TimeoutExpired,OSError):
+            failed.append(Path(path).name); continue
+        if Path(path).exists(): failed.append(Path(path).name); continue
+        kept.append(key); trashed+=1
+    if failed and not kept:
+        raise ValueError(f'{failed[0]} could not be moved to the Trash. Nothing was removed.' if len(failed)==1 else f'{len(failed)} files could not be moved to the Trash. Nothing was removed.')
+    return kept,trashed,failed
+
+def remove_tracks(db, keys):
+    for statement in ('DELETE FROM cues WHERE track_id=?','DELETE FROM sections WHERE track_id=?','DELETE FROM playlist_tracks WHERE track_id=?','DELETE FROM jobs WHERE track_id=?',
+                      # A finished download of the removed track would keep its set entry locked.
+                      "UPDATE dj_set_items SET download_id=NULL WHERE track_id=? AND download_id IN (SELECT id FROM acquisitions WHERE state='completed')",
+                      'UPDATE dj_set_items SET track_id=NULL,cue_pending=0 WHERE track_id=?',
+                      'UPDATE acquisitions SET track_id=NULL WHERE track_id=?','UPDATE library_import_items SET track_id=NULL WHERE track_id=?',
+                      'DELETE FROM tracks WHERE id=?'):
+        db.executemany(statement,keys)
+
+def handshake():
+    return {'version':VERSION,'capabilities':['import','waveform','manual_cues','rekordbox_xml','analysis_jobs','beat_tracking','rgb_waveform','manual_sections','optional_structure_suggestions','source_review','direct_https_acquisition','persistent_download_queue'],'fast_sections':True,'semantic_analysis':bool(os.environ.get('CRATELOOM_STRUCTURE_PYTHON')),'structure_max_duration':MAX_STRUCTURE_DURATION,'analysis_python_configured':bool(os.environ.get('CRATELOOM_ANALYSIS_PYTHON')),'analysis_version':ANALYSIS_VERSION,'storage_available':STORAGE_AVAILABLE}
+
+def stop_background():
+    """Stop every background worker: downloads, imports, scans, metadata batches and analysis."""
+    from .metadata_batch import shutdown as stop_metadata
+    stop_metadata()
+    from .library_imports import shutdown
+    from .acquisitions import shutdown as stop_acquisitions
+    from .set_import import AUTO_STOP, AUTO_WAKE
+    from .shazam_scan import shutdown as stop_shazam
+    AUTO_STOP.set()
+    AUTO_WAKE.set()
+    from .set_scan_jobs import shutdown as stop_set_scans
+    try: from .set_discovery import stop_all as stop_discovery
+    except ImportError: stop_discovery=lambda: None
+    stop_discovery()
+    stop_set_scans()
+    stop_shazam(sys.modules[__name__])
+    stop_acquisitions();shutdown()
+
 def dispatch(method, p):
+    if method == 'system.shutdown':
+        if STORAGE_AVAILABLE: stop_background()
+        return {'stopping':True}
+    if method.startswith('storage.'):
+        return storage.dispatch(sys.modules[__name__],method,p,lambda: (stop_background(),stop_workers()))
+    if method != 'handshake' and storage.blocked(sys.modules[__name__]):
+        raise ValueError(storage.blocked(sys.modules[__name__]))
+    if method == 'handshake': return handshake()
     with connect() as db:
-        if method == 'system.shutdown':
-            from .metadata_batch import shutdown as stop_metadata
-            stop_metadata()
-            from .library_imports import shutdown
-            from .acquisitions import shutdown as stop_acquisitions
-            from .set_import import AUTO_STOP, AUTO_WAKE
-            from .shazam_scan import shutdown as stop_shazam
-            AUTO_STOP.set()
-            AUTO_WAKE.set()
-            from .set_scan_jobs import shutdown as stop_set_scans
-            try: from .set_discovery import stop_all as stop_discovery
-            except ImportError: stop_discovery=lambda: None
-            stop_discovery()
-            stop_set_scans()
-            stop_shazam(sys.modules[__name__])
-            stop_acquisitions();shutdown(); return {'stopping':True}
-        if method == 'handshake': return {'version':VERSION,'capabilities':['import','waveform','manual_cues','rekordbox_xml','analysis_jobs','beat_tracking','rgb_waveform','manual_sections','optional_structure_suggestions','source_review','direct_https_acquisition','persistent_download_queue'],'fast_sections':True,'semantic_analysis':bool(os.environ.get('CRATELOOM_STRUCTURE_PYTHON')),'structure_max_duration':MAX_STRUCTURE_DURATION,'analysis_python_configured':bool(os.environ.get('CRATELOOM_ANALYSIS_PYTHON')),'analysis_version':ANALYSIS_VERSION}
         if method.startswith(('playlists.','metadata.')):
             from .preparation import dispatch as prepare
             return prepare(sys.modules[__name__],db,method,p)
@@ -443,6 +496,9 @@ def dispatch(method, p):
         if method == 'library.list': return [track(db,r['id']) for r in db.execute('SELECT id FROM tracks ORDER BY rowid DESC').fetchall()]
         if method == 'library.import':
             result,duplicate=import_track(db,p['path']);return dict(result,duplicate=duplicate)
+        if method in ('library.source_options','library.change_source','library.replace_file','library.job','library.preview_source'):
+            from . import source_change
+            return source_change.dispatch(sys.modules[__name__],db,method,p)
         if method == 'library.reveal':
             # Only a library track's own file can be shown, never an arbitrary path.
             t=track(db,p.get('id') if isinstance(p.get('id'),str) else '')
@@ -450,25 +506,18 @@ def dispatch(method, p):
             if sys.platform!='darwin': raise ValueError('Showing files is available on macOS only.')
             subprocess.run(['open','-R','--',t['path']],check=True,capture_output=True,timeout=10)
             return {'revealed':True}
-        if method == 'library.remove':
-            # Library records only: the audio file on disk is never touched, and
-            # derived caches (analysis, artwork, playback) are left in place.
+        if method in ('library.remove','library.trash'):
+            # library.remove touches library records only: the audio file on disk is never deleted, and
+            # derived caches (analysis, artwork, playback) are left in place. library.trash also moves
+            # each audio file to the Trash, from where it can be put back.
             ids=p.get('ids')
             if not isinstance(ids,list) or not 1<=len(ids)<=5000 or any(not isinstance(i,str) for i in ids): raise ValueError('Choose 1–5,000 library tracks to remove')
-            chosen=set(ids)
-            for row in db.execute("SELECT id,track_id FROM jobs WHERE state IN ('queued','running')").fetchall():
-                # Settle a worker that already finished; only live analysis blocks removal.
-                if row['track_id'] in chosen and job_status(db,row['id'])['state'] in ('queued','running'):
-                    raise ValueError('Analysis is still running for a selected track. Wait for it to finish or cancel it before removing the track.')
-            keys=[(i,) for i in dict.fromkeys(ids) if db.execute('SELECT 1 FROM tracks WHERE id=?',(i,)).fetchone()]
-            for statement in ('DELETE FROM cues WHERE track_id=?','DELETE FROM sections WHERE track_id=?','DELETE FROM playlist_tracks WHERE track_id=?','DELETE FROM jobs WHERE track_id=?',
-                              # A finished download of the removed track would keep its set entry locked.
-                              "UPDATE dj_set_items SET download_id=NULL WHERE track_id=? AND download_id IN (SELECT id FROM acquisitions WHERE state='completed')",
-                              'UPDATE dj_set_items SET track_id=NULL,cue_pending=0 WHERE track_id=?',
-                              'UPDATE acquisitions SET track_id=NULL WHERE track_id=?','UPDATE library_import_items SET track_id=NULL WHERE track_id=?',
-                              'DELETE FROM tracks WHERE id=?'):
-                db.executemany(statement,keys)
-            return {'removed':len(keys)}
+            keys=removable(db,ids)
+            trashed,failed=0,[]
+            if method=='library.trash':
+                keys,trashed,failed=trash_files(db,keys)
+            remove_tracks(db,keys)
+            return {'removed':len(keys),**({'trashed':trashed,'not_trashed':failed} if method=='library.trash' else {})}
         if method == 'track.relink':
             t=track(db,p['id'])
             if not t['missing']: raise ValueError('Only missing tracks can be relinked')
@@ -673,7 +722,7 @@ def dispatch(method, p):
 
 def main():
     from .set_import import start_auto_scans
-    start_auto_scans(sys.modules[__name__])
+    if STORAGE_AVAILABLE: start_auto_scans(sys.modules[__name__])
     for line in sys.stdin.buffer:
         req={}
         try:

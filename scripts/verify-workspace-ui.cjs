@@ -14,6 +14,7 @@ const fs=require('fs'); const assert=require('node:assert/strict');
  const errors=[];page.on('pageerror',error=>errors.push(error.message));
  const wav=Buffer.alloc(44+44100*2*8);wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(44100,24);wav.writeUInt32LE(88200,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(wav.length-44,40);for(let i=44;i<wav.length;i+=2)wav.writeInt16LE(Math.round(Math.sin(i/2/44100*440*2*Math.PI)*5000),i);
  await page.route('**/__qa/audio.wav',route=>route.fulfill({contentType:'audio/wav',body:wav}));
+ await page.route('**/__qa/analysis-*',route=>route.fulfill({contentType:'application/json',body:JSON.stringify({waveform:{peaks:Array.from({length:400},(_,i)=>.25+.6*Math.abs(Math.sin(i/9))),rgb:Array.from({length:400},(_,i)=>[.9,.2+.5*(i%40<8),.1])}})}));
  await page.route('**/__qa/cover-*',route=>route.fulfill({contentType:'image/svg+xml',body:'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="#53504a"/><path d="M0 68L100 20V100H0Z" fill="#a39b89"/><circle cx="56" cy="42" r="20" fill="#d6d0c4"/></svg>'}));
  await page.addInitScript(()=>{
  localStorage.setItem('theme','dark');
@@ -68,12 +69,28 @@ const fs=require('fs'); const assert=require('node:assert/strict');
  };
  // Test hooks: shorten a track (its media stays 8 s long, as WebKit reports DASH files) and record copies.
  window.__qaSetDuration=(id,seconds)=>{tracks.find(t=>t.id===id).duration=seconds;};
+ // Give a track a saved waveform and detected sections, as analysis would.
+ window.__qaSetWave=id=>{const t=tracks.find(t=>t.id===id);t.detail_analysis={...t.detail_analysis,cache_path:'/analysis-'+id+'.json',revision:'wave'};t.sections=[{id:'s1',start_us:0,end_us:3000000,label:'Intro',origin:'auto'},{id:'s2',start_us:3000000,end_us:8000000,label:'Up',origin:'auto'}];};
  Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{window.__qaClipboard=value;}}});
- window.__TAURI_INTERNALS__={convertFileSrc:path=>path.startsWith('/cover')?'/__qa'+path:'/__qa/audio.wav',invoke:async(cmd,args)=>{
+ const storageDefault={path:'/Users/qa/.crateloom',source:'default',available:true,volume:'This Mac',external:false,default_path:'/Users/qa/.crateloom',
+   usage:{bytes:6.4e9,files:812,groups:[{label:'Downloads',bytes:4.1e9},{label:'DJ set audio',bytes:1.9e9},{label:'Analysis',bytes:3.2e8},{label:'Library and other files',bytes:8e7}]},free:2.1e10,previous:null,moving:null};
+ const storageState=()=>{try{return JSON.parse(localStorage.getItem('qaStorage'))||JSON.parse(JSON.stringify(storageDefault));}catch{return JSON.parse(JSON.stringify(storageDefault));}};
+ const saveStorage=value=>localStorage.setItem('qaStorage',JSON.stringify(value));
+ window.__TAURI_INTERNALS__={convertFileSrc:path=>path.startsWith('/cover')||path.startsWith('/analysis')?'/__qa'+path:'/__qa/audio.wav',invoke:async(cmd,args)=>{
  if(cmd==='open_reference')return;
+ if(cmd==='restart_engine'){const restarts=JSON.parse(localStorage.getItem('qaRestarts') || '0');localStorage.setItem('qaRestarts',String(restarts+1));const st=storageState();if(st.moving&&st.moving.state!=='running'){st.moving=null;saveStorage(st);}return;}
+ if(cmd==='plugin:dialog|open')return window.__qaOpenPath ?? null;
  if(cmd!=='engine_call')return;
  const {method,params:p}=args;
  switch(method){
+ case 'storage.status':{const st=storageState();if(st.moving?.state==='running'){st.moving.copied=Math.min(st.moving.total,st.moving.copied+st.moving.total/2);if(st.moving.copied>=st.moving.total){Object.assign(st,{path:st.moving.target,volume:'SHARED SSD 2',external:true,source:'chosen',previous:{path:'/Users/qa/.crateloom',volume:'This Mac',bytes:6.4e9}});st.moving.state='done';}saveStorage(st);}return copy(st);}
+ case 'storage.check':{window.__qaStorageChecks=[...(window.__qaStorageChecks||[]),p];if(p.default)return {target:'/Users/qa/.crateloom',volume:'This Mac',external:false,mode:'move',problem:null,needed:6.4e9,files:812,free:4e10};
+   if(p.path==='/Volumes/SHARED SSD 2/Old')return {target:p.path,volume:'SHARED SSD 2',external:true,mode:'existing',problem:null,library:{tracks:42,changed_at:1760000000}};
+   return {target:p.path+'/CrateLoom Library',volume:'SHARED SSD 2',external:true,mode:'move',problem:null,needed:6.4e9,files:812,free:3.1e11};}
+ case 'storage.move':{window.__qaStorageMoves=[...(window.__qaStorageMoves||[]),p];const st=storageState();st.moving={state:'running',stage:'Copying',target:p.path+'/CrateLoom Library',copied:0,total:6.4e9,files_done:0,files:812,current:'downloads/track-1.m4a',error:null};saveStorage(st);return copy(st);}
+ case 'storage.use':{const st=storageState();Object.assign(st,{available:true,path:p.default?'/Users/qa/.crateloom':p.path,source:p.default?'default':'chosen',volume:p.default?'This Mac':'SHARED SSD 2',external:!p.default});saveStorage(st);localStorage.setItem('qaStorageUse',JSON.stringify(p));return copy(st);}
+ case 'storage.cancel':return copy(storageState());
+ case 'storage.discard_previous':{const st=storageState();st.previous=null;saveStorage(st);return {...copy(st),freed:6.4e9};}
  case 'handshake':return {fast_sections:false,semantic_analysis:false,structure_max_duration:1800,analysis_version:ANALYSIS_VERSION};
  case 'library.list':return copy(tracks);
  case 'playlists.list':{const snapshot=copy(playlists);if(window.__qaStaleNext){window.__qaStaleNext=false;window.__qaStaleStarted=true;await new Promise(resolve=>setTimeout(resolve,400));}return snapshot;}
@@ -94,12 +111,12 @@ const fs=require('fs'); const assert=require('node:assert/strict');
  case 'sets.cancel_scan':if('__qaSavedWarning' in window){report.warning=window.__qaSavedWarning;delete window.__qaSavedWarning;}report.scan={...report.scan,automatic:false,running:false,cancelling:false,progress:undefined};if(report.recognition.state==='running')report.recognition={...report.recognition,state:'paused'};return copy(report);
  // Recognizing a published tracklist's audio continues as the report's own audio scan.
  case 'sets.recognize':window.__qaRecognizeParams=copy(p);report.recognition={state:'running',confirmed:2,added:1,warning:null};report.provisional=HEARD;
-   report.scan={offset:0,duration:3783,retry_at:0,automatic:true,running:true,stalled:false,fast:true,samples:3,pending_matches:0,progress:{stage:'Identifying tracks',completed:3,total:null,unit:'samples',position:240,duration:3783,tracks_found:2}};return copy(report);
+   report.scan={offset:0,sampled_until:240,duration:3783,retry_at:0,automatic:true,running:true,stalled:false,fast:true,samples:3,pending_matches:0,progress:{stage:'Identifying tracks',completed:3,total:null,unit:'samples',position:240,duration:3783,tracks_found:2}};return copy(report);
  case 'sets.auto_scan':window.__qaAutoScanParams=copy(p);if('youtube_browser' in p)report.youtube_browser=p.youtube_browser;report.scan={...report.scan,automatic:p.enabled,running:false,progress:undefined};return copy(report);
  case 'sets.list':return [{id:'set',name:report.name,playlist_id:report.playlist_id,entries:report.tracks.length,imported:1,with_download:0,offset:null,duration:null,automatic:0,created_at:null}];
  case 'sets.get':{
    // Shazam asked the scan to wait: the engine reports when it resumes.
-   if(window.__qaShazamWait){window.__qaShazamWait=false;const resume=Date.now()/1000+95;report.scan={...report.scan,automatic:true,running:false,retry_at:resume,samples:8,pending_matches:8,progress:{stage:'Waiting for Shazam',completed:8,total:null,unit:'samples',position:391,duration:6730,tracks_found:4,resume_at:resume}};}
+   if(window.__qaShazamWait){window.__qaShazamWait=false;const resume=Date.now()/1000+95;report.scan={...report.scan,sampled_until:391,automatic:true,running:false,retry_at:resume,samples:8,pending_matches:8,progress:{stage:'Waiting for Shazam',completed:8,total:null,unit:'samples',position:391,duration:6730,tracks_found:4,resume_at:resume}};}
    // A stalled attempt (here a full disk) waits too, but not for Shazam; its raw engine text stays under Details.
    if(window.__qaStallWait){window.__qaStallWait=false;window.__qaSavedWarning=report.warning;const resume=Date.now()/1000+95;report.warning="Partial scan. [Errno 28] No space left on device: '/Users/qa/Library/Caches/CrateLoom/set-audio'";report.scan={...report.scan,automatic:true,running:false,retry_at:resume,progress:{stage:'Waiting before the next attempt',completed:300,total:1800,unit:'seconds',resume_at:resume}};}
    // A row with no artist but a listed link (report.listed_link), and back.
@@ -118,25 +135,42 @@ const fs=require('fs'); const assert=require('node:assert/strict');
    const track=tracks.find(t=>t.id===p.id);track.metadata={...track.metadata,values:p.values,pending:p.values,artwork_path:p.artwork_path,source:p.source};
    return {metadata:copy(track.metadata)};
  }
- case 'metadata.job':{const found=tasks.get(p.id);if(found.scan){
+ case 'metadata.cover':{window.__qaCoverRequests=[...(window.__qaCoverRequests||[]),copy(p)];const id='cover'+count++;tasks.set(id,{cover:true,end:Date.now()+300});return {id,state:'running'};}
+ case 'metadata.job':{const found=tasks.get(p.id);if(found.cover)return Date.now()<found.end?{id:p.id,state:'running',result:null,error:null}:{id:p.id,state:'completed',result:{path:'/cover-1'},error:null};if(found.scan){
    // A failure is either the raw text of an older engine or {error, error_detail}.
    if(window.__qaScanError){const failure=window.__qaScanError;return {id:p.id,state:'failed',cancellable:true,result:null,...(typeof failure==='string'?{error:failure}:failure)};}
    if(found.cancelled)return {id:p.id,state:Date.now()-found.cancelled>150?'cancelled':'cancelling',cancellable:true,result:null};
    // A published tracklist is saved at once; sources for its entries are then looked for in the background.
    if(window.__qaFinishPublished){report.watch=found.url || report.watch;report.youtube_browser=found.browser ?? null;report.playlist_id=null;delete report.scan;report.recognition=IDLE_RECOGNITION;report.provisional=[];report.discovery={pending:2,running:1};
      report.tracks.forEach((row,i)=>{row.source_search=[null,'searching','ready','choose','queued'][i];});return {id:p.id,state:'completed',cancellable:true,result:copy(report)};}
-   if(window.__qaFinishScan){report.watch=found.url || report.watch;report.youtube_browser=found.browser ?? null;report.recognition=IDLE_RECOGNITION;report.discovery={pending:0,running:0};report.provisional=HEARD;report.scan={offset:300,duration:1800,retry_at:0,automatic:true,running:true,stalled:false,fast:true,samples:7,pending_matches:2,progress:{stage:'Identifying tracks',completed:7,total:null,unit:'samples',position:360,duration:1800,tracks_found:2}};return {id:p.id,state:'completed',cancellable:true,result:copy(report)};}
+   if(window.__qaFinishScan){report.watch=found.url || report.watch;report.youtube_browser=found.browser ?? null;report.recognition=IDLE_RECOGNITION;report.discovery={pending:0,running:0};report.provisional=HEARD;report.scan={offset:300,sampled_until:360,duration:1800,retry_at:0,automatic:true,running:true,stalled:false,fast:true,samples:7,pending_matches:2,progress:{stage:'Identifying tracks',completed:7,total:null,unit:'samples',position:360,duration:1800,tracks_found:2}};return {id:p.id,state:'completed',cancellable:true,result:copy(report)};}
    return {id:p.id,state:'running',cancellable:true,progress:found.audio?{stage:'Identifying tracks',completed:7,total:null,unit:'samples',position:60,duration:3783,tracks_found:2}:{stage:'Reading playlist entries',completed:12,total:52,unit:'entries'}};
  }if(found.lookup){return {id:p.id,state:Date.now()<found.end?'running':'completed',result:{query:{title:'Low',artist:'Flo Rida,T-Pain',version:''},candidates:[{provider:'Apple Music',recording_id:'275496141',release_id:'275496110',values:{title:'Low (feat. T-Pain)',artist:'Flo Rida',album:'Mail On Sunday',genre:'Hip-Hop/Rap',date:'2007-10-09'},duration:231.4,duration_difference:1.5,match_status:'strong',reasons:[]}]}};}
 const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running'};if(task.playback)return {id:p.id,state:'completed',result:{path:'/audio.wav'}};if(task.entry_id){const row=report.tracks.find(r=>r.entry_id===task.entry_id);row.download_id='dl'+row.entry_id;row.download_state='queued';}return {id:p.id,state:'completed',result:copy(report)};}
  case 'sets.reorder':await new Promise(resolve=>setTimeout(resolve,150));report.tracks=p.entry_ids.map((id,position)=>({...report.tracks.find(row=>row.entry_id===id),position}));return copy(report);
  case 'track.playback':case 'track.get':return copy(tracks.find(t=>t.id===p.id));
  case 'library.reveal':window.__qaReveals=[...(window.__qaReveals || []),p.id];return {revealed:true};
+ case 'library.source_options':{window.__qaSourceSearches=[...(window.__qaSourceSearches || []),copy(p)];const track=tracks.find(t=>t.id===p.id);
+   const option=(id,title,channel,duration,extra)=>({title,url:'https://www.youtube.com/watch?v='+id,duration,channel,verified:false,matched:true,compatible:true,current:false,music_video:false,difference:Math.round((duration-track.duration)*10)/10,...extra});
+   const result={query:p.query || track.artist+' '+track.title,current:'https://www.youtube.com/watch?v=CURRENTxxx1',options:[
+     option('TOPICxxxxx1','Low (feat. T-Pain)','Flo Rida',231,{topic:true,recommended:true,recommendation_reason:'Audio-only upload'}),
+     option('CURRENTxxx1','Flo Rida - Low ft. T-Pain [Official Video]','Flo Rida',262,{verified:true,current:true,music_video:true}),
+     option('LIVExxxxxx1','Flo Rida - Low (Live)','Flo Rida',240,{compatible:false}),
+     option('OTHERxxxxx1','Something else','Nobody',200,{matched:false,compatible:false})]};
+   window.__qaSourceJob=result;return {id:'source-job',state:'running',error:null,result:null};}
+ case 'analysis.enqueue':window.__qaAnalysisQueued=[...(window.__qaAnalysisQueued || []),p.id];return null;
+ case 'library.preview_source':window.__qaPreviews=[...(window.__qaPreviews || []),copy(p)];return {id:'preview-'+(p.url || 'current'),state:'running',error:null,result:null};
+ case 'library.job':return {id:p.id,state:'completed',error:null,result:p.id.startsWith('preview-')?{preview_path:'/previews/'+p.id+'.m4a'}:p.id==='source-job'?copy(window.__qaSourceJob):{id:'acq-change',state:'queued'}};
+ case 'library.change_source':window.__qaSourceChanges=[...(window.__qaSourceChanges || []),copy(p)];return {id:'change-job',state:'running',error:null,result:null};
+ case 'library.replace_file':{window.__qaSourceFiles=[...(window.__qaSourceFiles || []),copy(p)];const track=tracks.find(t=>t.id===p.id);track.path=p.path;return {...copy(track),previous_deleted:true};}
  case 'cues.save':{const track=tracks.find(t=>t.id===p.id);track.cues=copy(p.cues);window.__qaCueSaves=[...(window.__qaCueSaves || []),copy(p.cues)];return copy(track);}
  case 'playlists.save':{window.__qaSaves=(window.__qaSaves||0)+1;await new Promise(resolve=>setTimeout(resolve,150));if(window.__qaFailNext){window.__qaFailNext=false;throw new Error('Save failed');}
    let playlist=playlists.find(item=>item.id===p.id);if(!playlist){playlist={id:'created'+count++,name:p.name,track_ids:[]};playlists.push(playlist);}
    playlist.name=p.name;playlist.track_ids=p.track_ids;if(playlist.id==='p')localStorage.setItem('qaOrder',JSON.stringify(p.track_ids));return copy(playlist);}
  case 'playlists.delete':{const at=playlists.findIndex(item=>item.id===p.id);if(at<0)throw new Error('Playlist not found');window.__qaPlaylistDeletes=[...(window.__qaPlaylistDeletes || []),playlists[at].name];playlists.splice(at,1);return {deleted:true};}
+ case 'library.trash':{window.__qaTrashed=[...(window.__qaTrashed || []),copy(p.ids)];let removed=0;
+   for(const id of p.ids){const at=tracks.findIndex(t=>t.id===id);if(at>=0){tracks.splice(at,1);removed++;}}
+   playlists.forEach(item=>{item.track_ids=item.track_ids.filter(id=>!p.ids.includes(id));});return {removed,trashed:removed,not_trashed:[]};}
  case 'library.remove':{window.__qaLibraryRemovals=[...(window.__qaLibraryRemovals || []),copy(p.ids)];let removed=0;
    for(const id of p.ids){const at=tracks.findIndex(t=>t.id===id);if(at>=0){tracks.splice(at,1);removed++;}}
    playlists.forEach(item=>{item.track_ids=item.track_ids.filter(id=>!p.ids.includes(id));});return {removed};}
@@ -155,7 +189,11 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  const frameBox=()=>page.locator('.metadata-editor').evaluate(el=>{const r=el.getBoundingClientRect();return [r.x,r.y,r.width,r.height].join(',');});
  const watchFrame=()=>page.evaluate(()=>{window.__qaFrames=new Set();window.__qaWatchFrame=true;const tick=()=>{const el=document.querySelector('.metadata-editor');if(el){const r=el.getBoundingClientRect();window.__qaFrames.add([r.x,r.y,r.width,r.height].join(','));}if(window.__qaWatchFrame)requestAnimationFrame(tick);};tick();});
  const watchedFrames=()=>page.evaluate(()=>{window.__qaWatchFrame=false;return [...window.__qaFrames];});
- async function drag(handle,row){const a=await handle.boundingBox(),b=await row.boundingBox();assert.ok(a&&b);await page.mouse.move(a.x+a.width/2,a.y+a.height/2);await page.mouse.down();await page.mouse.move(b.x+Math.min(b.width/2,120),b.y+b.height/2,{steps:12});await page.waitForTimeout(60);await page.mouse.up();await wait();}
+ let lifted=null;
+ async function drag(handle,row){const a=await handle.boundingBox(),b=await row.boundingBox();assert.ok(a&&b);await page.mouse.move(a.x+a.width/2,a.y+a.height/2);await page.mouse.down();await page.mouse.move(b.x+Math.min(b.width/2,120),b.y+b.height/2,{steps:12});await page.waitForTimeout(60);
+  // What the drag shows while the row is held: a copy following the pointer, the source dimmed in place.
+  lifted=await page.evaluate(()=>{const ghost=document.querySelector('.reorder-ghost');return ghost?{text:ghost.textContent,sources:document.querySelectorAll('.reorder-source').length,pointer:getComputedStyle(ghost).pointerEvents}:null;});
+  await page.mouse.up();await wait();}
  await page.goto(baseUrl);
  await page.getByRole('button',{name:'Collapse sidebar',exact:true}).click();await wait();
  assert.equal(await page.locator('.sidebar').evaluate(el=>Math.round(el.getBoundingClientRect().width)),64);
@@ -168,6 +206,9 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  assert.equal((await order())[0],'Low (feat. T-Pain)');
  await drag(page.locator('.track-row .reorder-handle').first(),page.locator('.track-row').nth(2));
  assert.deepEqual((await order()).slice(0,3),['The Days (Notion Remix)','Don’t Stop the Music','Low (feat. T-Pain)']);
+ assert.ok(lifted && lifted.text.includes('Low (feat. T-Pain)') && lifted.sources===1 && lifted.pointer==='none','a copy of the dragged row follows the pointer: '+JSON.stringify(lifted));
+ assert.equal(await page.locator('.reorder-ghost, .reorder-source').count(),0,'the drag preview is removed on drop');
+ checks.dragPreview='dragging a playlist row shows a copy of it under the pointer and dims the row; both are gone after the drop';
  await page.getByRole('button',{name:'Move Low (feat. T-Pain) up',exact:true}).click();await wait();
  assert.equal((await order())[1],'Low (feat. T-Pain)');
  await page.getByRole('button',{name:'Reorder Low (feat. T-Pain). Use up or down arrow keys.',exact:true}).focus();await page.keyboard.press('ArrowUp');await wait();assert.equal((await order())[0],'Low (feat. T-Pain)');
@@ -202,6 +243,10 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  const candidate=page.locator('.metadata-match').first();assert.equal(await candidate.isEnabled(),true);
  assert.equal(await text(candidate.locator('.metadata-match-status')),'Close match');await candidate.click();
  assert.equal(await text(candidate.locator('.metadata-match-status')),'Selected');
+ // The track had no cover, so the chosen release's cover is fetched and applied at once.
+ await page.waitForFunction(()=>document.querySelector('.metadata-cover-button img')?.getAttribute('src')?.includes('/cover-1'));
+ assert.equal((await page.evaluate(()=>window.__qaCoverRequests))[0].provider,'Apple Music');
+ checks.metadataAutoCover='choosing a match for a track without a cover fetches that release cover (metadata.cover) and shows it';
  await page.getByRole('button',{name:'Save to library',exact:true}).click();
  await page.waitForFunction(()=>window.__qaSavedSource?.provider==='Apple Music');
  assert.equal(await page.evaluate(()=>window.__qaSavedSource.provider),'Apple Music');
@@ -212,9 +257,10 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  assert.match(await text(page.locator('.metadata-staged')),/^Saved in the library, not yet written to the file: /);
  // The artwork is the cover control: keyboard opens its menu, Escape closes only the menu.
  for(const gone of ['Choose image','Find release cover','Remove cover'])assert.equal(await page.getByRole('button',{name:gone,exact:true}).count(),0);
- const coverButton=page.getByRole('button',{name:'Cover art: add a cover',exact:true});await coverButton.focus();await page.keyboard.press('Enter');
- const coverMenu=page.getByRole('menu',{name:'Cover art: add a cover',exact:true});await coverMenu.waitFor();
- assert.deepEqual((await coverMenu.getByRole('menuitem').allInnerTexts()).map(item=>item.split('\n')[0].trim()),['Choose an image file…','Use the release cover']);
+ // The cover fetched with the match is in place, so the menu offers to change or remove it.
+ const coverButton=page.getByRole('button',{name:'Cover art: change or remove',exact:true});await coverButton.focus();await page.keyboard.press('Enter');
+ const coverMenu=page.getByRole('menu',{name:'Cover art: change or remove',exact:true});await coverMenu.waitFor();
+ assert.deepEqual((await coverMenu.getByRole('menuitem').allInnerTexts()).map(item=>item.split('\n')[0].trim()),['Choose an image file…','Use the release cover','Remove cover']);
  await page.keyboard.press('Escape');await coverMenu.waitFor({state:'detached'});
  assert.equal(await page.locator('.metadata-editor').count(),1);assert.equal(await coverButton.evaluate(el=>el===document.activeElement),true);
  await wait();await page.screenshot({path:output+'/metadata-dark.png'});
@@ -310,8 +356,9 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  if(await page.getByRole('button',{name:'Clear track selection',exact:true}).count())await page.getByRole('button',{name:'Clear track selection',exact:true}).click();
  await page.getByLabel('Search tracks',{exact:true}).fill('Low');assert.match(await text(autoButton),/\xb7 1 shown$/);
  // Auto-write: the choice is remembered, sent as write_tags, and the strip says what reached the files.
- assert.equal(await page.locator('.auto-write-note').count(),0);await autoWrite.check();
- assert.match(await text(page.locator('.auto-write-note')),/^Writes only tracks where a match and a cover are found\. Each file is backed up first\.$/);
+ await autoWrite.check();
+ // The option explains itself in its tooltip; no note is added under it.
+ assert.equal(await page.locator('.auto-write-note').count(),0);
  assert.equal(await page.evaluate(()=>localStorage.getItem('autoMetadataWriteTags')),'1');
  await page.reload();await page.getByText('Metadata analysis complete',{exact:true}).waitFor();assert.equal(await autoWrite.isChecked(),true);
  // The fixture starts every load in the dark theme; this part runs in the light one.
@@ -436,7 +483,8 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  await wait();await page.screenshot({path:output+'/library-toolbar-dark.png'});
  await page.getByRole('button',{name:'Export options',exact:true}).click();
  await page.getByRole('button',{name:'Add music',exact:true}).click();
- assert.deepEqual(await page.getByRole('menuitem').locator('.menu-item-text > span').allTextContents(),['Files…','Folder…']);
+ // In a playlist, Add music also offers tracks already in the library.
+ assert.deepEqual(await page.getByRole('menuitem').locator('.menu-item-text > span').allTextContents(),await page.locator('.library[data-playlist=true]').count()?['From your library…','Files…','Folder…']:['Files…','Folder…']);
  await page.keyboard.press('Escape');assert.equal(await page.getByRole('menu').count(),0);
  await page.setViewportSize({width:600,height:540});await page.getByRole('button',{name:'Collapse sidebar',exact:true}).click();await wait();
  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
@@ -555,7 +603,7 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
  const cancelBounds=await pauseScan.boundingBox(),footerBounds=await page.locator('.transport').boundingBox();if(!(cancelBounds.y+cancelBounds.height<=footerBounds.y))failures.push('Pause scan is not fully above the player at 900x650: '+JSON.stringify({cancelBounds,footerBounds}));
  await wait();await page.screenshot({path:output+'/audio-continuation-light.png'});
  await pauseScan.click();await resumeScan.waitFor();
- assert.match(await scanStatus.innerText(),/Audio scan paused[\s\S]*Checked up to 05:00 of 30:00\.[\s\S]*7 audio samples saved \xb7 2 matches waiting to be placed/);
+ assert.match(await scanStatus.innerText(),/Audio scan paused[\s\S]*Sampled up to 06:00 of 30:00\.[\s\S]*7 audio samples saved \xb7 2 matches waiting to be placed/);
  await wait();await page.screenshot({path:output+'/audio-paused-compact-light.png'});
  // A paused scan of a YouTube set resumes with the access chosen beside the Resume button.
  const resumeAccess=page.locator('.set-resume-access').getByLabel('YouTube access for this set',{exact:true});
@@ -711,29 +759,130 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
   const width=()=>artist.evaluate(el=>Math.round(el.getBoundingClientRect().width));
   const before=await width(),grip=await resizer.boundingBox();
   await page.mouse.move(grip.x+grip.width/2,grip.y+grip.height/2);await page.mouse.down();
-  await page.mouse.move(grip.x+grip.width/2-80,grip.y+grip.height/2,{steps:8});await page.mouse.up();await wait();
+  await page.mouse.move(grip.x+grip.width/2+80,grip.y+grip.height/2,{steps:8});await page.mouse.up();await wait();
   const wider=await width();assert.ok(Math.abs(wider-before-80)<=2,`artist column grew by ${wider-before}px`);
   assert.equal(await page.locator('.track-row .track-artist').first().evaluate(el=>Math.round(el.getBoundingClientRect().width)),wider,'rows follow the header');
   await page.reload();await page.getByRole('button',{name:'All Tracks',exact:true}).click();await wait();assert.equal(await width(),wider,'the width survives a reload');
-  await resizer.focus();await page.keyboard.press('ArrowRight');await wait();assert.equal(await width(),wider-8);
+  await resizer.focus();await page.keyboard.press('ArrowRight');await wait();assert.equal(await width(),wider+8);
   await resizer.dblclick();await wait();assert.ok(Math.abs(await width()-before)<=1,'double-click restores the default width');
-  checks.columnResize='artist edge drag widens the column by the drag distance, rows follow, persists, arrow keys step 8px, double-click resets';
+  // The handle between Title and Artist belongs to Title: dragging it right widens Title, and Artist keeps its place after it.
+  const title=head.locator('.select-visible'),titleWidth=()=>title.evaluate(el=>Math.round(el.getBoundingClientRect().width));
+  const titleGrip=await head.getByRole('separator',{name:'Resize Title column',exact:true}).boundingBox(),titleBefore=await titleWidth(),artistLeft=await artist.evaluate(el=>Math.round(el.getBoundingClientRect().left));
+  assert.ok(Math.abs(titleGrip.x+titleGrip.width/2-(await title.evaluate(el=>el.getBoundingClientRect().right))-8)<=2,'the Title handle sits on the gap right of Title');
+  await page.mouse.move(titleGrip.x+titleGrip.width/2,titleGrip.y+titleGrip.height/2);await page.mouse.down();
+  await page.mouse.move(titleGrip.x+titleGrip.width/2+60,titleGrip.y+titleGrip.height/2,{steps:8});await page.mouse.up();await wait();
+  assert.ok(Math.abs(await titleWidth()-titleBefore-60)<=2,`title column grew by ${await titleWidth()-titleBefore}px`);
+  assert.ok(Math.abs(await artist.evaluate(el=>Math.round(el.getBoundingClientRect().left))-artistLeft-60)<=2,'artist moves along with the title edge');
+  await head.getByRole('separator',{name:'Resize Title column',exact:true}).dblclick();await wait();assert.ok(Math.abs(await titleWidth()-titleBefore)<=1);
+  checks.columnResize='each handle sits on its column\'s right edge: dragging Artist\'s or Title\'s widens that column by the drag distance, rows follow, persists, arrow keys step 8px, double-click resets';
+
+  // # is the list's own order and sorts like the other columns.
+  assert.deepEqual(await page.locator('.track-row .track-order').allTextContents(),['1','2','3','4','5']);
+  await sortButton('#').click();await wait();assert.deepEqual(await order(),unsorted);
+  await sortButton('#').click();await wait();assert.deepEqual(await order(),[...unsorted].reverse());
+  assert.deepEqual(await page.locator('.track-row .track-order').allTextContents(),['5','4','3','2','1'],'each row keeps its own number');
+  await sortButton('#').click();await wait();assert.deepEqual(await order(),unsorted);
+  checks.numberColumn='# shows each track\'s place in the list, sorts ascending and descending, then back';
+
+  // The window itself never scrolls or rubber-bands; only the lists inside it do.
+  assert.deepEqual(await page.evaluate(()=>[getComputedStyle(document.documentElement).overflow,getComputedStyle(document.body).overflow,getComputedStyle(document.body).overscrollBehaviorY,document.scrollingElement.scrollHeight<=window.innerHeight]),['hidden','hidden','none',true]);
+  checks.windowScroll='html and body do not scroll and have overscroll-behavior none';
 
   const firstRow=page.locator('.track-row').first(),menu=page.getByRole('menu',{name:'Actions for Low (feat. T-Pain)',exact:true});
+  const menuItems=async panel=>(await panel.locator(':scope > [role=menuitem]').allTextContents()).map(text=>text.trim());
   await firstRow.locator('.track-artist').click({button:'right'});await menu.waitFor();
-  assert.deepEqual(await menu.getByRole('menuitem').allTextContents(),['Copy title','Copy artist','Copy artist and title','Reveal in Finder']);
-  assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Copy title');
-  await menu.getByRole('menuitem',{name:'Copy artist',exact:true}).click();await menu.waitFor({state:'detached'});
+  assert.deepEqual(await menuItems(menu),['Play','Edit cues','Edit metadata…','Add to playlist','Copy','Change source…','Reveal in Finder','Remove from library…','Delete…']);
+  assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Play');
+  assert.equal(await page.evaluate(()=>document.querySelector('[role=menu]').parentElement===document.body),true,'the menu is drawn on top of the whole window');
+  // Copy is a submenu: hovering opens it beside the item.
+  await menu.getByRole('menuitem',{name:'Copy',exact:true}).hover();
+  const copyMenu=page.getByRole('menu',{name:'Copy',exact:true});await copyMenu.waitFor();
+  assert.deepEqual(await menuItems(copyMenu),['Title','Artist','Artist and title']);
+  await copyMenu.getByRole('menuitem',{name:'Artist',exact:true}).click();await menu.waitFor({state:'detached'});
   assert.equal(await page.evaluate(()=>window.__qaClipboard),'Flo Rida, T-Pain');
-  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Copy artist and title',exact:true}).click();
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Copy',exact:true}).hover();
+  await copyMenu.getByRole('menuitem',{name:'Artist and title',exact:true}).click();
   assert.equal(await page.evaluate(()=>window.__qaClipboard),'Flo Rida, T-Pain - Low (feat. T-Pain)');
+  // The keyboard reaches the submenu too: Right opens it with its first item focused, Left goes back.
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.waitFor();
+  await page.keyboard.press('ArrowDown');assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Edit cues');
+  await menu.getByRole('menuitem',{name:'Copy',exact:true}).focus();await page.keyboard.press('ArrowRight');await copyMenu.waitFor();
+  assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Title');
+  await page.keyboard.press('ArrowLeft');await copyMenu.waitFor({state:'detached'});assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Copy');
+  await page.keyboard.press('ArrowRight');await page.keyboard.press('Enter');await menu.waitFor({state:'detached'});
+  assert.equal(await page.evaluate(()=>window.__qaClipboard),'Low (feat. T-Pain)');
+  // Add to playlist lists every playlist; one that already has the track is marked Added.
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Add to playlist',exact:true}).click();
+  const addMenu=page.getByRole('menu',{name:'Add to playlist',exact:true});await addMenu.waitFor();
+  assert.deepEqual(await menuItems(addMenu),['Friday selectionsAdded','New playlist']);
+  assert.equal(await addMenu.getByRole('menuitem',{name:/^Friday selections/}).isDisabled(),true);
+  await page.keyboard.press('Escape');await addMenu.waitFor({state:'detached'});await page.keyboard.press('Escape');await menu.waitFor({state:'detached'});
   await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Reveal in Finder',exact:true}).click();
   assert.deepEqual(await page.evaluate(()=>window.__qaReveals),['t0']);
-  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.waitFor();await page.keyboard.press('ArrowDown');
-  assert.equal(await page.evaluate(()=>document.activeElement?.textContent),'Copy artist');
+  // The ⋯ button on a row opens the same menu.
+  await firstRow.hover();await firstRow.getByRole('button',{name:'More actions for Low (feat. T-Pain)',exact:true}).click();await menu.waitFor();
   await page.keyboard.press('Escape');await menu.waitFor({state:'detached'});
-  const box=await menu.count();assert.equal(box,0);
-  checks.contextMenu='right-click opens Copy title / artist / artist and title and Reveal in Finder at the pointer; copies the text, calls library.reveal, arrow keys move, Escape closes';
+  assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('aria-label')),'More actions for Low (feat. T-Pain)','focus returns to the ⋯ button');
+  checks.contextMenu='right-click or the row ⋯ button opens Play, Edit cues, Edit metadata, Add to playlist ›, Copy ›, Change source, Reveal in Finder, Remove from library and Delete, drawn above the whole window; submenus open on hover, click or Right and close with Left; copies the text, calls library.reveal, Escape closes and restores focus';
+
+  // Change source: other versions with the original audio first, a pasted link, or a file.
+  const changeDialog=page.getByRole('dialog',{name:'Change source',exact:true});
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Change source…',exact:true}).click();
+  await changeDialog.waitFor();await changeDialog.getByRole('list',{name:'Versions of this track',exact:true}).waitFor();
+  assert.deepEqual(await page.evaluate(()=>window.__qaSourceSearches),[{id:'t0'}]);
+  assert.equal(await changeDialog.getByLabel('Search for versions',{exact:true}).inputValue(),'Flo Rida, T-Pain Low (feat. T-Pain)');
+  const versionRows=changeDialog.getByRole('list',{name:'Versions of this track',exact:true}).getByRole('listitem');
+  assert.equal(await versionRows.count(),3);
+  assert.match(await versionRows.first().innerText(),/Low \(feat\. T-Pain\)[\s\S]*Flo Rida · 3:51 · 3:43 longer than now[\s\S]*Audio-only upload/);
+  assert.match(await versionRows.nth(1).innerText(),/Current source[\s\S]*Music video/);
+  assert.equal(await versionRows.nth(1).getByRole('button',{name:/^Use /}).isDisabled(),true,'the source in use cannot be chosen again');
+  assert.match(await versionRows.nth(2).innerText(),/Different version/);
+  assert.equal(await changeDialog.getByRole('list',{name:'Other results',exact:true}).getByRole('listitem').count(),1);
+  // The track is shown as labelled fields; no long explanation.
+  assert.match(await changeDialog.innerText(),/Title\s*Low \(feat\. T-Pain\)\s*Artist\s*Flo Rida, T-Pain\s*Length\s*\d+:\d\d/i);
+  assert.doesNotMatch(await changeDialog.innerText(),/cues and playlists stay|measured again/);
+  // Listen first: the current audio from the preview bar, then another version from its row.
+  const previewBar=changeDialog.getByRole('group',{name:'Preview',exact:true});
+  await previewBar.getByRole('button',{name:'Play preview',exact:true}).click();
+  await previewBar.getByRole('button',{name:'Pause preview',exact:true}).waitFor();
+  assert.deepEqual(await page.evaluate(()=>window.__qaPreviews),[{id:'t0'}]);
+  assert.match(await previewBar.innerText(),/Current audio/);
+  await versionRows.first().getByRole('button',{name:'Play Low (feat. T-Pain)',exact:true}).click();
+  await versionRows.first().getByRole('button',{name:'Pause Low (feat. T-Pain)',exact:true}).waitFor();
+  assert.deepEqual((await page.evaluate(()=>window.__qaPreviews)).at(-1),{id:'t0',url:'https://www.youtube.com/watch?v=TOPICxxxxx1'});
+  assert.match(await previewBar.innerText(),/Low \(feat\. T-Pain\)/);
+  await previewBar.getByLabel('Preview position',{exact:true}).fill('4');
+  await versionRows.first().getByRole('button',{name:'Pause Low (feat. T-Pain)',exact:true}).click();
+  await previewBar.getByRole('button',{name:'Play preview',exact:true}).waitFor();
+  // The source in use plays the track's own file, without another download.
+  await versionRows.nth(1).getByRole('button',{name:/^Play /}).click();await previewBar.getByRole('button',{name:'Pause preview',exact:true}).waitFor();
+  assert.equal((await page.evaluate(()=>window.__qaPreviews)).length,2,'the current audio is fetched once');
+  await previewBar.getByRole('button',{name:'Pause preview',exact:true}).click();
+  checks.changeSourcePreview='Change source shows title, artist and length as fields without the long note; the preview bar plays the current audio, each row plays its version (library.preview_source with its link), the bar shows what is playing and scrubs, and the current source reuses the fetched file';
+  await wait();await page.screenshot({path:output+'/change-source.png'});
+  // Your own words search again.
+  await changeDialog.getByLabel('Search for versions',{exact:true}).fill('low flo rida slowed');await changeDialog.getByRole('button',{name:'Search',exact:true}).click();await wait();
+  assert.deepEqual((await page.evaluate(()=>window.__qaSourceSearches)).at(-1),{id:'t0',query:'low flo rida slowed'});
+  await versionRows.first().getByRole('button',{name:'Use Low (feat. T-Pain)',exact:true}).click();
+  await changeDialog.getByText('Downloading the new version.',{exact:true}).waitFor();
+  assert.deepEqual(await page.evaluate(()=>window.__qaSourceChanges),[{id:'t0',url:'https://www.youtube.com/watch?v=TOPICxxxxx1'}]);
+  await changeDialog.getByRole('button',{name:'Done',exact:true}).click();await changeDialog.waitFor({state:'detached'});
+  // A pasted link.
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Change source…',exact:true}).click();await changeDialog.waitFor();
+  await changeDialog.getByLabel('Or paste a link',{exact:true}).fill('https://soundcloud.com/artist/low-edit');await changeDialog.getByRole('button',{name:'Use link',exact:true}).click();
+  await changeDialog.getByText('Downloading the new version.',{exact:true}).waitFor();
+  assert.deepEqual((await page.evaluate(()=>window.__qaSourceChanges)).at(-1),{id:'t0',url:'https://soundcloud.com/artist/low-edit'});
+  await page.keyboard.press('Escape');await changeDialog.waitFor({state:'detached'});
+  // A file on this Mac replaces the audio at once.
+  await page.evaluate(()=>{window.__qaOpenPath='/music/Low (album version).wav';});
+  await firstRow.click({button:'right',position:{x:500,y:20}});await menu.getByRole('menuitem',{name:'Change source…',exact:true}).click();await changeDialog.waitFor();
+  await changeDialog.getByRole('button',{name:'Choose a file on this Mac…',exact:true}).click();await changeDialog.waitFor({state:'detached'});
+  assert.deepEqual(await page.evaluate(()=>window.__qaSourceFiles),[{id:'t0',path:'/music/Low (album version).wav'}]);
+  await page.getByText(/^Audio replaced\. Tempo, key and beat grid are being measured again; the previous download was deleted\.$/).waitFor();
+  // The new audio is measured again.
+  await page.waitForFunction(()=>(window.__qaAnalysisQueued || []).includes('t0'));
+  await page.evaluate(()=>{window.__qaOpenPath=null;});
+  checks.changeSource='Change source lists versions with the audio-only upload recommended, the current source locked, music videos and other versions marked; searches your own words, downloads a chosen version or pasted link, and replaces the audio from a file, then queues its analysis';
 
   // The media is 8 s long but the track is 2 s: playback stops at 0:02 and moves on.
   await page.evaluate(()=>window.__qaSetDuration('t0',2));
@@ -741,6 +890,131 @@ const task=tasks.get(p.id);if(Date.now()<task.end)return {id:p.id,state:'running
   await page.locator('.player-title').getByText('The Days (Notion Remix)',{exact:true}).waitFor({timeout:6000});
   checks.trackEnd='a track whose media runs past its measured length ends at that length and the next track starts';
   await page.evaluate(()=>window.__qaSetDuration('t0',8));
+ }
+
+ // Playlists: add from the library through Add music, from a track's menu, and the player bar's menu.
+ {
+  await page.reload();await page.getByRole('button',{name:'All Tracks',exact:true}).click();await wait();
+  // The Downloads button is an icon with its name kept for assistive technology.
+  const downloadsButton=page.getByRole('button',{name:'Downloads',exact:true});
+  assert.equal((await downloadsButton.innerText()).trim(),'');assert.equal(await downloadsButton.getAttribute('title'),'Downloads');
+  await page.getByLabel('New playlist name',{exact:true}).fill('Warm up');await page.getByRole('button',{name:'Create playlist',exact:true}).click();
+  await page.locator('.library[data-playlist=true]').waitFor();await page.keyboard.press('Escape');await wait();
+  await page.getByRole('button',{name:'Add music',exact:true}).click();
+  assert.deepEqual((await page.getByRole('menu').last().getByRole('menuitem').allInnerTexts()).map(text=>text.split('\n')[0].trim()),['From your library…','Files…','Folder…']);
+  await page.getByRole('menuitem',{name:/^From your library/}).click();
+  const picker=page.getByRole('dialog',{name:'Add to “Warm up”',exact:true});await picker.waitFor();
+  assert.equal(await picker.getByRole('listitem').count(),5);
+  await picker.getByLabel('Search your library',{exact:true}).fill('days');
+  assert.equal(await picker.getByRole('listitem').count(),1);
+  await picker.getByLabel('Select all shown',{exact:true}).check();
+  await picker.getByLabel('Search your library',{exact:true}).fill('');
+  await picker.getByRole('checkbox',{name:'Add Low (feat. T-Pain)',exact:true}).check();
+  await picker.getByRole('button',{name:'Add 2 tracks',exact:true}).click();await picker.waitFor({state:'detached'});
+  await page.getByText('Added 2 tracks to “Warm up”.',{exact:true}).waitFor();
+  assert.deepEqual(await page.locator('.track-row .track-name strong').allTextContents(),['Low (feat. T-Pain)','The Days (Notion Remix)'],'library order is kept');
+  // In a playlist, the menu can also take the track out of it.
+  const warmRow=page.locator('.track-row').first(),warmMenu=page.getByRole('menu',{name:'Actions for Low (feat. T-Pain)',exact:true});
+  await warmRow.click({button:'right',position:{x:500,y:20}});await warmMenu.waitFor();
+  await warmMenu.getByRole('menuitem',{name:'Remove from “Warm up”',exact:true}).click();await wait();
+  assert.deepEqual(await page.locator('.track-row .track-name strong').allTextContents(),['The Days (Notion Remix)']);
+  // From All Tracks, a track's menu adds it to another playlist.
+  await page.getByRole('button',{name:'All Tracks',exact:true}).click();await wait();
+  const row=page.locator('.track-row').nth(2),title=(await row.locator('.track-name strong').textContent()).trim();
+  const rowMenu=page.getByRole('menu',{name:`Actions for ${title}`,exact:true});
+  await row.click({button:'right',position:{x:500,y:20}});await rowMenu.getByRole('menuitem',{name:'Add to playlist',exact:true}).hover();
+  await page.getByRole('menu',{name:'Add to playlist',exact:true}).getByRole('menuitem',{name:/^Warm up/}).click();
+  await page.getByText(`Added 1 track to “Warm up”.`,{exact:true}).waitFor();
+  assert.match(await page.locator('.playlist-nav .nav',{hasText:'Warm up'}).innerText(),/Warm up\s*2/);
+  checks.addToPlaylist='a playlist\'s Add music offers From your library, Files and Folder; the picker searches, selects all shown, adds in library order and skips tracks already there; a track\'s menu adds it to another playlist and, inside a playlist, removes it from that playlist';
+
+  // The player bar: right-click on the track or its ⋯ button opens the same menu, above the bar.
+  await page.evaluate(()=>window.__qaSetWave('t2'));
+  await row.locator('.track-name').click();await wait();
+  // The track in the player shows its waveform with sections under its row; clicking it plays from there.
+  const rowWave=page.getByRole('slider',{name:`Waveform of ${title}`,exact:true});await rowWave.waitFor();
+  assert.equal(await page.locator('.track-row-wave').count(),1);
+  assert.equal(await page.evaluate(()=>document.querySelector('.track-row-wave').previousElementSibling.querySelector('.track-name strong').textContent),title);
+  assert.deepEqual(await rowWave.locator('.section-band').allTextContents(),['Intro','Up']);
+  await page.waitForFunction(()=>document.querySelector('.track-row-wave canvas')?.width>0);
+  await wait();await page.screenshot({path:output+'/row-wave.png'});
+  const waveBox=await rowWave.boundingBox();await rowWave.click({position:{x:waveBox.width*.5,y:12}});
+  await page.locator('footer .play[aria-label=Pause]').waitFor();
+  assert.ok(await page.evaluate(()=>Number(document.querySelector('.track-row-wave .overview').getAttribute('aria-valuenow'))>=3),'clicking the waveform seeks there');
+  await page.locator('footer .play').click();
+  checks.rowWave='the track in the player shows its waveform, sections and playhead under its row; clicking it seeks there and plays';
+  const nowArea=page.locator('.now-area'),playerMenu=page.getByRole('menu',{name:`Actions for ${title}`,exact:true});
+  await nowArea.click({button:'right'});await playerMenu.waitFor();
+  assert.equal((await playerMenu.locator(':scope > [role=menuitem]').first().textContent()).trim(),'Play');
+  const covered=await page.evaluate(()=>{const menu=document.querySelector('.context-menu');const box=menu.getBoundingClientRect();const footer=document.querySelector('footer.transport').getBoundingClientRect();
+    const points=[[box.left+box.width/2,box.bottom-6],[box.left+box.width/2,box.top+6]];return {inside:points.every(([x,y])=>menu.contains(document.elementFromPoint(x,y))),overlapsFooter:box.bottom>footer.top};});
+  assert.equal(covered.inside,true,'nothing covers the menu, not even the player bar');
+  await page.keyboard.press('Escape');await playerMenu.waitFor({state:'detached'});
+  await page.getByRole('button',{name:`More actions for ${title}`,exact:true}).last().click();await playerMenu.waitFor();
+  const placed=await page.evaluate(()=>{const box=document.querySelector('.context-menu').getBoundingClientRect(),button=document.querySelector('.now-more').getBoundingClientRect();return box.bottom<=button.top+1&&box.top>=0;});
+  assert.equal(placed,true,'the ⋯ menu opens upward from its button and stays in the window');
+  await wait();await page.screenshot({path:output+'/player-menu.png'});
+  // Delete moves the file to the Trash after asking.
+  await playerMenu.getByRole('menuitem',{name:'Delete…',exact:true}).click();
+  const confirmDelete=page.getByRole('alertdialog',{name:`Delete “${title}”?`,exact:true});await confirmDelete.waitFor();
+  assert.match(await confirmDelete.innerText(),/moved to the Trash, and the track is removed from CrateLoom[\s\S]*put the file back from the Trash/);
+  await wait();await page.screenshot({path:output+'/delete-confirm.png'});
+  await confirmDelete.getByRole('button',{name:'Move to Trash',exact:true}).click();await confirmDelete.waitFor({state:'detached'});
+  await page.getByText('Moved 1 file to the Trash and removed the track from the library.',{exact:true}).waitFor();
+  assert.equal(await page.locator('.track-row').count(),4);
+  assert.equal((await page.locator('.player-title').textContent()).trim(),'No track selected');
+  checks.playerMenu='right-click on the player\'s track or its ⋯ button opens the track menu above the player bar; Delete asks, then moves the file to the Trash, removes the track and clears the player';
+ }
+
+ // Library location: shows what the library holds, moves it to a chosen folder, then restarts on it.
+ {
+  await page.evaluate(()=>{window.__qaOpenPath='/Volumes/SHARED SSD 2';});
+  await page.getByRole('button',{name:'Library location…',exact:true}).click();
+  const storageDialog=page.getByRole('dialog',{name:'Library location',exact:true});await storageDialog.waitFor();
+  await storageDialog.getByText('/Users/qa/.crateloom',{exact:true}).waitFor();
+  assert.match(await storageDialog.innerText(),/6\.4 GB in 812 files · 21 GB free on this drive/);
+  assert.deepEqual((await storageDialog.getByRole('list',{name:'What the library holds',exact:true}).getByRole('listitem').allInnerTexts()).map(text=>text.trim().replace(/\s*\n\s*/,'\n')),['Downloads\n4.1 GB','DJ set audio\n1.9 GB','Analysis\n320 MB','Library and other files\n80 MB']);
+  assert.equal(await storageDialog.getByRole('button',{name:'Move back to this Mac',exact:true}).count(),0,'the default folder offers no move back');
+  await storageDialog.getByRole('button',{name:'Choose a folder…',exact:true}).click();
+  const planCard=storageDialog.getByRole('group',{name:'New library location',exact:true});await planCard.waitFor();
+  assert.match(await planCard.innerText(),/\/Volumes\/SHARED SSD 2\/CrateLoom Library[\s\S]*copies 812 files \(6\.4 GB\) to “SHARED SSD 2”, which has 310 GB free/);
+  await wait();await page.screenshot({path:output+'/storage-plan.png'});
+  await planCard.getByRole('button',{name:'Move library',exact:true}).click();
+  await storageDialog.getByRole('progressbar',{name:'Moving the library',exact:true}).waitFor();
+  assert.equal(await storageDialog.getByRole('button',{name:'Close',exact:true}).isDisabled(),true,'the window stays open while moving');
+  assert.deepEqual(await page.evaluate(()=>window.__qaStorageMoves),[{path:'/Volumes/SHARED SSD 2'}]);
+  // The move finishes, the engine restarts and the window reloads on the new library, saying so once.
+  await page.getByText(/^Library moved to \/Volumes\/SHARED SSD 2\/CrateLoom Library\. The earlier copy is still on this Mac; delete it in Library location to free 6\.4 GB\.$/).waitFor({timeout:8000});
+  assert.equal(await page.evaluate(()=>localStorage.getItem('qaRestarts')),'1');
+  await page.getByRole('button',{name:'Library location…',exact:true}).click();await storageDialog.waitFor();
+  await storageDialog.getByText('SHARED SSD 2',{exact:true}).waitFor();
+  await storageDialog.getByRole('button',{name:'Move back to this Mac',exact:true}).waitFor();
+  await storageDialog.getByRole('button',{name:'Delete earlier copy…',exact:true}).click();
+  const discard=page.getByRole('alertdialog',{name:'Delete the earlier copy?',exact:true});await discard.waitFor();
+  assert.match(await discard.innerText(),/permanently deletes \/Users\/qa\/\.crateloom \(6\.4 GB\)\. It cannot be undone/);
+  await discard.getByRole('button',{name:'Delete',exact:true}).click();await discard.waitFor({state:'detached'});
+  await storageDialog.getByText('Deleted the earlier copy and freed 6.4 GB.',{exact:true}).waitFor();
+  assert.equal(await storageDialog.getByRole('button',{name:'Delete earlier copy…',exact:true}).count(),0);
+  // A folder that already has a library is used as it is.
+  await page.evaluate(()=>{window.__qaOpenPath='/Volumes/SHARED SSD 2/Old';});
+  await storageDialog.getByRole('button',{name:'Choose a folder…',exact:true}).click();await planCard.waitFor();
+  assert.match(await planCard.innerText(),/already has a CrateLoom library with 42 tracks/);
+  await planCard.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.keyboard.press('Escape');await storageDialog.waitFor({state:'detached'});
+  checks.storageLocation='Library location shows the folder, drive, size by kind and free space; choosing a folder plans the move with sizes, moving shows progress and locks the window, then the engine restarts and the window reloads with a one-time notice; the earlier copy can be deleted after confirming; a folder with a library is offered as-is';
+
+  // With the drive disconnected, the app explains which drive to connect instead of opening an empty library.
+  await page.evaluate(()=>{const st=JSON.parse(localStorage.getItem('qaStorage'));st.available=false;st.usage=null;localStorage.setItem('qaStorage',JSON.stringify(st));window.__qaOpenPath=null;});
+  await page.reload();
+  await page.getByRole('heading',{name:'Connect “SHARED SSD 2”',exact:true}).waitFor();
+  assert.equal(await page.locator('.track-row').count(),0);
+  await wait();await page.screenshot({path:output+'/storage-missing.png'});
+  await page.evaluate(()=>{const st=JSON.parse(localStorage.getItem('qaStorage'));st.available=true;localStorage.setItem('qaStorage',JSON.stringify(st));});
+  await page.getByRole('button',{name:'Try again',exact:true}).click();
+  await page.locator('.track-row').first().waitFor();
+  assert.equal(await page.evaluate(()=>localStorage.getItem('qaRestarts')),'2');
+  checks.storageMissing='a library on a disconnected drive shows Connect “drive” with Try again, Choose another library and Use this Mac; Try again restarts the engine and opens the library once it is back';
+  await page.evaluate(()=>{localStorage.removeItem('qaStorage');localStorage.removeItem('qaRestarts');});
  }
 
  checks.viewTransitions=viewTransitions;

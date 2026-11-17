@@ -188,7 +188,8 @@ def dispatch(api,db,method,p):
         identity=catalog_identity(title,artist)
         if not identity['title']:raise ValueError('Enter a song title to search')
         from . import metadata_lookup
-        return launch(lambda progress:metadata_lookup.search(api,request,identity,t['duration'],bool(p.get('refresh')),progress),incremental=True)
+        # Layered like Auto metadata, but stops at the first reading with any plausible match and may fall back to the title alone.
+        return launch(lambda progress:metadata_lookup.layered_search(api,request,title,artist,t['duration'],bool(p.get('refresh')),progress,loose=True)[0],incremental=True)
     if method=='metadata.cover':
         return launch(lambda:{'path':fetch_cover(api,p)})
     if method=='metadata.write':

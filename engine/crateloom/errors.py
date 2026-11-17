@@ -14,7 +14,7 @@ EAGER_MODULES = (
     'crateloom.metadata_batch', 'crateloom.metadata_lookup', 'crateloom.metadata_matching', 'crateloom.playback',
     'crateloom.playlist_sources', 'crateloom.preparation', 'crateloom.providers', 'crateloom.rekordbox_export',
     'crateloom.scan_audio', 'crateloom.service_links', 'crateloom.set_artwork', 'crateloom.set_discovery',
-    'crateloom.set_import', 'crateloom.set_scan_jobs', 'crateloom.shazam_fast', 'crateloom.shazam_scan',
+    'crateloom.set_import', 'crateloom.set_scan_jobs', 'crateloom.source_change', 'crateloom.storage', 'crateloom.shazam_fast', 'crateloom.shazam_scan',
     'crateloom.shazam_worker', 'crateloom.soundcloud_download', 'crateloom.structure_worker', 'crateloom.tag_writer',
     'crateloom.youtube_audio', 'crateloom.youtube_tracklist',
 )

@@ -7,9 +7,10 @@ import {Menu} from './Menu';
 import {X, Search, ImagePlus, Pencil, Trash2, Disc3, ChevronLeft, ChevronRight, Check, AlertTriangle, Info, ArrowUpDown} from 'lucide-react';
 import './metadata.css';
 
-export type MetadataState={revision?:string;artwork_supported?:boolean;values:Record<string,string>;pending:Record<string,string>;artwork_path:string|null;artwork_pending:boolean;source:{provider:string;recording_id:string;release_id?:string}|null;automatic?:{rank:number;match_status:string;reviewed:boolean};automatic_review?:{state:string;reason?:string|null;query?:{title:string;artist:string;version:string};candidates:Candidate[];warnings:string[]}|null};
+type LookupQuery={title:string;artist:string;version:string;note?:string};
+export type MetadataState={revision?:string;artwork_supported?:boolean;values:Record<string,string>;pending:Record<string,string>;artwork_path:string|null;artwork_pending:boolean;source:{provider:string;recording_id:string;release_id?:string}|null;automatic?:{rank:number;match_status:string;reviewed:boolean};automatic_review?:{state:string;reason?:string|null;query?:LookupQuery;candidates:Candidate[];warnings:string[]}|null};
 type Candidate={provider?:string;recording_id:string;release_id:string|null;values:Record<string,string>;version:string;duration:number|null;duration_difference:number|null;match_status:'strong'|'review'|'rejected';reasons:string[];release_kind?:string;release_country?:string;release_format?:string};
-type Task={id:string;state:string;error:string|null;result:{candidates?:Candidate[];path?:string;cached?:boolean;partial?:boolean;warnings?:string[];providers?:{name:string;state:string}[];query?:{title:string;artist:string;version:string}}|null};
+type Task={id:string;state:string;error:string|null;result:{candidates?:Candidate[];path?:string;cached?:boolean;partial?:boolean;warnings?:string[];providers?:{name:string;state:string}[];query?:LookupQuery}|null};
 const FIELDS=['title','artist','album','genre','date'];
 const FIELD_LABELS:Record<string,string>={title:'Title',artist:'Artist',album:'Album',genre:'Genre',date:'Release date'};
 const DATE_FORMAT=/^\d{4}(?:-\d{2}(?:-\d{2})?)?$/;
@@ -36,7 +37,7 @@ export function MetadataEditor({ids,onTrackOpen,onClose,onSaved}:{ids:string[];o
  const [index,setIndex]=useState(0),id=ids[index],generation=useRef(0);
  const [state,setState]=useState<MetadataState|null>(null),[busy,setBusy]=useState(false),[error,setError]=useState(''),[message,setMessage]=useState('');
  const [loadFailed,setLoadFailed]=useState(false),[reloadKey,setReloadKey]=useState(0);
- const [matches,setMatches]=useState<Candidate[]>([]),[task,setTask]=useState<Task|null>(null),[lookupQuery,setLookupQuery]=useState<{title:string;artist:string;version:string}|null>(null),[showExcluded,setShowExcluded]=useState(false);
+ const [matches,setMatches]=useState<Candidate[]>([]),[task,setTask]=useState<Task|null>(null),[lookupQuery,setLookupQuery]=useState<LookupQuery|null>(null),[showExcluded,setShowExcluded]=useState(false);
  const [taskKind,setTaskKind]=useState<'search'|'cover'>('search');
  const [dateError,setDateError]=useState(''),[confirm,setConfirm]=useState<null|'close'|'reload'>(null);
  // What the library held when this track was loaded or last saved; anything else is an unsaved edit.
@@ -73,7 +74,7 @@ export function MetadataEditor({ids,onTrackOpen,onClose,onSaved}:{ids:string[];o
  };
  const action=async(fn:()=>Promise<void>)=>{if(actionLock.current)return;actionLock.current=true;setBusy(true);setError('');setMessage('');setConfirm(null);try{await fn();}catch(e){if(mounted.current && !(e instanceof FieldError))setError(errorText(e));}finally{actionLock.current=false;if(mounted.current)setBusy(false);}};
  const search=(refresh=false)=>action(async()=>{if(!state)return;setMatches([]);setLookupQuery(null);setShowExcluded(false);setTaskKind('search');const request=generation.current;const job=await call<Task>('metadata.search',{id,title:state.values.title,artist:state.values.artist,refresh});if(request===generation.current)setTask(job);});
- const findCover=()=>action(async()=>{if(!state?.source)return;setTaskKind('cover');const request=generation.current;const job=await call<Task>('metadata.cover',{id,...state.source});if(request===generation.current)setTask(job);});
+ const findCover=(source=state?.source)=>action(async()=>{if(!source)return;setTaskKind('cover');const request=generation.current;const job=await call<Task>('metadata.cover',{id,...source});if(request===generation.current)setTask(job);});
  const selectImage=()=>action(async()=>{const path=await open({multiple:false,filters:[{name:'Artwork',extensions:['jpg','jpeg','png']}]});if(!path)return;const result=await call<{path:string}>('metadata.artwork',{path});setState(s=>s?{...s,artwork_path:result.path,artwork_pending:true}:s);});
  const searching=taskKind==='search' && task?.state==='running',findingCover=taskKind==='cover' && task?.state==='running';
  const working=busy || findingCover;
@@ -88,12 +89,14 @@ export function MetadataEditor({ids,onTrackOpen,onClose,onSaved}:{ids:string[];o
  };
  const excluded=matches.filter(c=>c.match_status==='rejected'),usable=matches.filter(c=>c.match_status!=='rejected');
  const choose=(c:Candidate)=>{
-  if(!state || c.match_status==='rejected')return;
+  if(!state || c.match_status==='rejected' || working)return;
   const differentRelease=state.source && (state.source.provider!==(c.provider || 'MusicBrainz') || state.source.release_id!==c.release_id);
+  const source={provider:c.provider || 'MusicBrainz',recording_id:c.recording_id,...(c.release_id?{release_id:c.release_id}:{})};
   setState({...state,values:{...state.values,...Object.fromEntries(Object.entries(c.values).filter(([key,v])=>v || state.source && key!=='genre'))},
-   ...(differentRelease?{artwork_path:null,artwork_pending:true}:{}),
-   source:{provider:c.provider || 'MusicBrainz',recording_id:c.recording_id,...(c.release_id?{release_id:c.release_id}:{})}});
+   ...(differentRelease?{artwork_path:null,artwork_pending:true}:{}),source});
   setMessage('');
+  // Without a cover, the chosen release's cover is fetched and applied straight away.
+  if((!state.artwork_path || differentRelease) && (source.release_id || source.provider!=='MusicBrainz'))void findCover(source);
  };
  const staged=state?[...Object.keys(state.pending).map(key=>(FIELD_LABELS[key] || key).toLowerCase()),...(state.artwork_pending?['cover']:[])]:[];
  const date=state?.values.date || '';
@@ -101,7 +104,7 @@ export function MetadataEditor({ids,onTrackOpen,onClose,onSaved}:{ids:string[];o
  // One search control: the first lookup may use saved results, a repeat always asks the catalogs again.
  const searched=matches.length>0 || taskKind==='search' && task?.state==='completed';
  const lookupStatus=searching?(matches.length?'First matches are ready. Still checking the remaining catalog…':'Searching Apple Music and MusicBrainz…')
-  :lookupQuery?`Searched for: ${[lookupQuery.artist,lookupQuery.title,lookupQuery.version].filter(Boolean).join(' · ')}`
+  :lookupQuery?`Searched for: ${[lookupQuery.artist,lookupQuery.title,lookupQuery.version].filter(Boolean).join(' · ')}${lookupQuery.note?` (${lookupQuery.note})`:''}`
   :state?.source?`Details taken from: ${state.source.provider}`:'';
  const shown=showExcluded?matches:usable;
  // The frame has a fixed size; only the two columns inside it scroll, so nothing that loads can resize the window.

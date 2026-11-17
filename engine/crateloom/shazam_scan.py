@@ -212,7 +212,15 @@ def run_worker(api, python, source, offset, expected_duration, batch_seconds, pl
     control = set_scan_jobs.current()
     if control:
         control.partial={'hits':[],'scanned_until':offset,'duration':duration,**({'plan':plan} if plan is not None else {})}
-        control.publish('Identifying tracks',completed=offset,total=duration,unit='seconds')
+        if plan is not None:
+            # A sampled pass restarts its worker at the batch start; until the worker reports, say how
+            # far the saved samples reach rather than "0:00 of …".
+            taken = [int(at) for at in (plan.get('samples') or {}) if str(at).lstrip('-').isdigit()]
+            found = {match.get('key') for match in (plan.get('samples') or {}).values() if isinstance(match,dict) and match.get('key')}
+            control.publish('Identifying tracks',completed=len(taken),total=None,unit='samples',position=max(taken,default=offset),
+                            duration=duration,tracks_found=len(found))
+        else:
+            control.publish('Identifying tracks',completed=offset,total=duration,unit='seconds')
     last_feedback = None
     partial = None
     started = last_activity = time.monotonic()

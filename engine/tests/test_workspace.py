@@ -289,6 +289,27 @@ class Workspace(unittest.TestCase):
             with self.subTest(id=missing), self.assertRaisesRegex(ValueError, 'Playlist not found'):
                 api.dispatch('playlists.delete', {'id': missing})
 
+    def test_library_trash_moves_the_file_to_the_trash_and_removes_the_track(self):
+        keep, gone = self.audio('keep-trash.wav'), self.audio('gone-trash.wav')
+        api.dispatch('playlists.save', {'name': 'Set', 'track_ids': [keep['id'], gone['id']]})
+        bin_dir = self.root / 'fake-bin'; bin_dir.mkdir(exist_ok=True)
+        trash_dir = self.root / 'Trash'; trash_dir.mkdir(exist_ok=True)
+        fake = bin_dir / 'trash'
+        fake.write_text(f'#!/bin/sh\nmv "$1" "{trash_dir}/"\n'); fake.chmod(0o755)
+        with patch.object(api, 'TRASH', str(fake)), patch.object(api.sys, 'platform', 'darwin'):
+            self.assertEqual(api.dispatch('library.trash', {'ids': [gone['id']]}), {'removed': 1, 'trashed': 1, 'not_trashed': []})
+        self.assertFalse(Path(gone['path']).exists())
+        self.assertTrue((trash_dir / Path(gone['path']).name).is_file())
+        self.assertTrue(Path(keep['path']).is_file())
+        self.assertEqual([row['id'] for row in api.dispatch('library.list', {})], [keep['id']])
+        self.assertEqual(api.dispatch('playlists.list', {})[0]['track_ids'], [keep['id']])
+        # A file the Trash refuses keeps its track, and nothing is removed.
+        fake.write_text('#!/bin/sh\nexit 1\n')
+        with patch.object(api, 'TRASH', str(fake)), patch.object(api.sys, 'platform', 'darwin'), self.assertRaisesRegex(ValueError, 'could not be moved to the Trash'):
+            api.dispatch('library.trash', {'ids': [keep['id']]})
+        self.assertTrue(Path(keep['path']).is_file())
+        self.assertEqual(len(api.dispatch('library.list', {})), 1)
+
     def test_library_remove_drops_records_but_never_the_audio(self):
         report = self.saved(2)
         keep, gone = self.audio('keep.wav'), self.audio('gone.wav')

@@ -116,7 +116,7 @@ class MetadataBatch(unittest.TestCase):
     def test_reversed_title_and_artist_are_put_back_by_a_catalog_match(self):
         # A "Song - Artist" playlist imported as artist "2 . Ain't No Way", title "Chris Brown".
         reversed_track = self.track(0)
-        api.dispatch('metadata.save', {'id': reversed_track['id'], 'values': {'title': 'Chris Brown', 'artist': "2 . Ain't No Way"}})
+        api.dispatch('metadata.save', {'id': reversed_track['id'], 'values': {'title': 'Chris Brown', 'artist': "2 . Ain't No Way (Lyrics)"}})
         unmatched = self.track(1)
         found = candidate("Ain't No Way")
         found['values']['artist'] = 'Chris Brown'

@@ -47,7 +47,7 @@ impl Engine {
     }
 }
 
-struct EngineState(Mutex<Engine>);
+struct EngineState(Mutex<Option<Engine>>);
 
 #[tauri::command]
 async fn engine_call(
@@ -63,7 +63,19 @@ async fn engine_call(
         "playlists.save",
         "playlists.delete",
         "library.remove",
+        "library.trash",
         "library.reveal",
+        "library.source_options",
+        "library.change_source",
+        "library.replace_file",
+        "library.job",
+        "library.preview_source",
+        "storage.status",
+        "storage.check",
+        "storage.move",
+        "storage.use",
+        "storage.cancel",
+        "storage.discard_previous",
         "metadata.get",
         "metadata.reload",
         "metadata.save",
@@ -134,7 +146,8 @@ async fn engine_call(
     if !METHODS.contains(&method.as_str()) {
         return Err("Unknown engine method".into());
     }
-    let mut engine = state.0.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    let engine = guard.as_mut().ok_or("The engine is restarting. Try again in a moment.")?;
     let result = engine.request(&method, params)?;
     if method == "library.import" || method == "track.get" || method == "track.playback" || method == "track.relink" {
         if let Some(path) = result["path"].as_str() {
@@ -150,6 +163,12 @@ async fn engine_call(
     }
     let artwork=result["artwork_path"].as_str().filter(|_|method=="metadata.get" || method=="metadata.reload").or_else(||result["metadata"]["artwork_path"].as_str()).or_else(|| result["path"].as_str().filter(|_| method=="metadata.artwork")).or_else(|| result["result"]["path"].as_str().filter(|_| method=="metadata.job" || method=="providers.job"));
     if let Some(path)=artwork { app.asset_protocol_scope().allow_file(path).map_err(|e|e.to_string())?; }
+    // A version you listen to before choosing it: a cached preview download or the track's own audio.
+    if method == "library.job" {
+        if let Some(path) = result["result"]["preview_path"].as_str() {
+            app.asset_protocol_scope().allow_file(path).map_err(|e| e.to_string())?;
+        }
+    }
     // Artwork stays local; grant only engine-returned paths, including set reports.
     for report in [&result, &result["result"]] {
         if let Some(tracks) = report["tracks"].as_array() {
@@ -214,7 +233,8 @@ fn bundled_engine() -> Option<std::path::PathBuf> {
     binary.is_file().then_some(binary)
 }
 
-fn main() {
+/// Starts the engine and checks its handshake. The library location is read by the engine itself.
+fn start_engine() -> Result<Engine, String> {
     // The override is for testing a frozen sidecar. The default remains the local development engine.
     let mut command = if let Some(executable) = std::env::var_os("CRATELOOM_ENGINE_EXEC") {
         Command::new(executable)
@@ -255,7 +275,7 @@ fn main() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("Could not start Python engine");
+        .map_err(|e| format!("Could not start the audio engine: {e}"))?;
     let input = child.stdin.take().unwrap();
     let output = BufReader::new(child.stdout.take().unwrap());
     let mut engine = Engine {
@@ -263,17 +283,29 @@ fn main() {
         input,
         output,
     };
-    let handshake = engine
-        .request("handshake", serde_json::json!({}))
-        .expect("Engine handshake failed");
-    assert!(
-        handshake["version"].is_string(),
-        "Engine handshake lacks a version"
-    );
+    let handshake = engine.request("handshake", serde_json::json!({}))?;
+    if !handshake["version"].is_string() {
+        return Err("Engine handshake lacks a version".into());
+    }
+    Ok(engine)
+}
+
+/// Stops the engine and starts it again, for example after the library moved to another folder.
+#[tauri::command]
+async fn restart_engine(state: State<'_, EngineState>) -> Result<(), String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    // Dropping the old engine asks it to stop its workers before the new one opens the library.
+    drop(guard.take());
+    *guard = Some(start_engine()?);
+    Ok(())
+}
+
+fn main() {
+    let engine = start_engine().expect("Could not start the audio engine");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .manage(EngineState(Mutex::new(engine)))
-        .invoke_handler(tauri::generate_handler![engine_call, open_reference])
+        .manage(EngineState(Mutex::new(Some(engine))))
+        .invoke_handler(tauri::generate_handler![engine_call, open_reference, restart_engine])
         .run(tauri::generate_context!())
         .expect("desktop error");
 }
@@ -300,16 +332,17 @@ mod tests {
     fn frontend_methods_are_exposed_by_bridge() {
         let frontend = [include_str!("../../src/main.tsx"), include_str!("../../src/MetadataEditor.tsx"),
             include_str!("../../src/DiscoveryPanel.tsx"), include_str!("../../src/MetadataBatch.tsx"),
-            include_str!("../../src/SetImportPanel.tsx")].join("");
+            include_str!("../../src/SetImportPanel.tsx"), include_str!("../../src/ChangeSource.tsx"), include_str!("../../src/StorageSettings.tsx"), include_str!("../../src/TrackMenu.tsx")].join("");
         let bridge = include_str!("main.rs");
         for method in ["cues.auto", "grid.fixed", "grid.restore", "imports.start", "imports.get", "imports.cancel", "imports.latest", "track.relink", "playlists.list", "playlists.save", "metadata.get", "metadata.reload", "metadata.save", "metadata.search", "metadata.cover", "metadata.job", "metadata.artwork", "metadata.write", "providers.capabilities", "providers.resolve", "providers.job", "providers.cover", "acquisitions.list", "acquisitions.enqueue", "acquisitions.cancel", "acquisitions.retry", "export.enqueue"] {
             assert!(frontend.contains(method));
             let quoted = format!("\"{}\"", method);
             assert!(bridge.split("if !METHODS").next().unwrap().contains(&quoted), "Missing method: {}", method);
         }
-        for method in ["metadata.batch.start", "metadata.batch.get", "metadata.batch.latest", "metadata.batch.cancel", "sets.cancel_task", "sets.cancel_scan", "sets.recognize", "library.reveal"] {
+        for method in ["metadata.batch.start", "metadata.batch.get", "metadata.batch.latest", "metadata.batch.cancel", "sets.cancel_task", "sets.cancel_scan", "sets.recognize", "library.reveal", "library.source_options", "library.change_source", "library.replace_file", "library.job", "storage.status", "storage.check", "storage.move", "storage.use", "storage.cancel", "storage.discard_previous", "library.trash", "library.preview_source"] {
             assert!(frontend.contains(method));
             assert!(bridge.split("if !METHODS").next().unwrap().contains(&format!("\"{}\"",method)));
         }
+        assert!(frontend.contains("invoke('restart_engine')") && bridge.contains("generate_handler![engine_call, open_reference, restart_engine]"));
     }
 }

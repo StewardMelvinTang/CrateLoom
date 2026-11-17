@@ -69,6 +69,91 @@ class Acquisitions(unittest.TestCase):
             self.assertEqual(api.dispatch('acquisitions.list', {}), [])
             self.assertTrue(target.is_file())
             self.assertEqual(api.dispatch('track.get',{'id':track['id']})['cues'][0]['label'],'Keep')
+    def test_change_source_replaces_audio_and_keeps_the_track(self):
+        def tone(name,seconds,frequency):
+            path=self.root/name
+            subprocess.run(['ffmpeg','-v','error','-f','lavfi','-i',f'sine=frequency={frequency}:duration={seconds}','-y',str(path)],check=True)
+            return path
+        with patch.object(download_http,'open_url',side_effect=lambda *a,**k:Response(self.audio)):
+            first=self.finish(self.enqueue()['id']);self.assertEqual(first['state'],'completed',first)
+        tid=first['track_id'];old_path=Path(first['path'])
+        api.dispatch('cues.save',{'id':tid,'cues':[{'slot':0,'position_us':500000,'label':'Drop'}]})
+        with api.connect() as db:
+            db.execute("INSERT INTO playlists(id,name) VALUES ('p','Set')");db.execute("INSERT INTO playlist_tracks VALUES ('p',?,0)",(tid,))
+            db.execute("INSERT INTO sections(id,track_id,start_us,end_us,label,origin) VALUES ('mine',?,0,500000,'Intro','manual'),('auto',?,0,500000,'Verse','fast')",(tid,tid))
+            db.execute("UPDATE tracks SET analysis='{}' WHERE id=?",(tid,))
+        # A downloaded version becomes the same track's audio.
+        longer=tone('longer.wav',2,660).read_bytes()
+        other=providers.register(api,dict(self.source,url='https://artist.example/other.wav',resolved_url='https://artist.example/other.wav',declared_bytes=len(longer)))
+        with patch.object(download_http,'open_url',side_effect=lambda *a,**k:Response(longer)):
+            job=self.finish(api.dispatch('acquisitions.enqueue',{'source_id':other['id'],'values':{'title':'Reviewed title','artist':'Artist'},'replace_track_id':tid})['id'])
+        self.assertEqual((job['state'],job['stage'],job['track_id']),('completed','Source changed',tid),job)
+        track=api.dispatch('track.get',{'id':tid})
+        self.assertEqual(track['path'],job['path']);self.assertAlmostEqual(track['duration'],2,places=1)
+        self.assertEqual([c['label'] for c in track['cues']],['Drop']);self.assertEqual([s['id'] for s in track['sections']],['mine'])
+        self.assertIsNone(track['analysis']);self.assertEqual(track['title'],'Reviewed title')
+        self.assertEqual(track['metadata']['pending'],{'title':'Reviewed title','artist':'Artist'})
+        with api.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM tracks').fetchone()[0],1)
+            self.assertEqual(db.execute("SELECT track_id FROM playlist_tracks WHERE playlist_id='p'").fetchone()[0],tid)
+        # CrateLoom's own earlier download is removed; nothing else is.
+        self.assertFalse(old_path.exists())
+        # A local file: the replaced download goes, and that file itself is never removed later.
+        mine=tone('mine.wav',3,880)
+        replaced=api.dispatch('library.replace_file',{'id':tid,'path':str(mine)})
+        self.assertEqual((replaced['path'],replaced['previous_deleted']),(str(mine),True))
+        self.assertFalse(Path(job['path']).exists())
+        again=api.dispatch('library.replace_file',{'id':tid,'path':str(tone('again.wav',4,990))})
+        self.assertFalse(again['previous_deleted']);self.assertTrue(mine.is_file())
+        # Audio already in the library as another track is refused.
+        with patch.object(download_http,'open_url',side_effect=lambda *a,**k:Response(self.audio)):
+            second=self.finish(self.enqueue(values={'title':'Second'})['id'])
+        with self.assertRaisesRegex(ValueError,'already in your library as “Second”'):
+            api.dispatch('library.replace_file',{'id':tid,'path':str(self.wav)})
+        with self.assertRaisesRegex(ValueError,'already belongs to another library track'):
+            api.dispatch('library.replace_file',{'id':tid,'path':second['path']})
+    def test_preview_plays_the_current_audio_and_fetches_a_youtube_version_once(self):
+        from crateloom import source_change
+        track={'id':'t','path':str(self.wav),'missing':False,'codec':'pcm_s16le','duration':1.0}
+        self.assertEqual(source_change.preview(api,track,None),{'preview_path':str(self.wav),'duration':1.0})
+        with self.assertRaisesRegex(ValueError,'Only YouTube'):
+            source_change.preview(api,track,'https://soundcloud.com/artist/song')
+        url='https://www.youtube.com/watch?v=TOPICxxxxx1'
+        def transfer(self_,jid,source,media,headers,partial,check,*,ranges):
+            partial.write_bytes(b'audio')
+            return {},5,'digest'
+        with patch.object(youtube_audio,'resolve',return_value=({'url':url,'declared_bytes':5,'duration':154},'https://media.googlevideo.com/x',{})) as resolve,\
+             patch.object(acquisitions.AudioTransfer,'transfer',transfer):
+            first=source_change.preview(api,track,url)
+            second=source_change.preview(api,track,url)
+        self.assertEqual(first,second)
+        self.assertEqual(Path(first['preview_path']),self.root/'source-previews'/'TOPICxxxxx1.m4a')
+        self.assertEqual(Path(first['preview_path']).read_bytes(),b'audio')
+        self.assertEqual(resolve.call_count,1,'a preview is downloaded once')
+        self.assertEqual([path.name for path in (self.root/'source-previews').iterdir()],['TOPICxxxxx1.m4a'])
+
+    def test_change_source_lists_the_original_audio_first(self):
+        from crateloom import source_change
+        videos=[{'id':'MVxxxxxxxx1','title':'SZA - Kill Bill (Official Video)','channel':'SZA','duration':276,'channel_is_verified':True},
+                {'id':'TOPICxxxxx1','title':'Kill Bill','channel':'SZA - Topic','duration':154},
+                {'id':'LIVExxxxxx1','title':'SZA - Kill Bill (Live)','channel':'SZA','duration':170},
+                {'id':'OTHERxxxxx1','title':'Something else entirely','channel':'Nobody','duration':200}]
+        track={'title':'Kill Bill','artist':'SZA','duration':276.0}
+        with patch.object(youtube_audio,'search',side_effect=lambda engine,query:list(videos) if not query.endswith(' audio') else []) as search:
+            found=source_change.options(api,track,None,'https://www.youtube.com/watch?v=MVxxxxxxxx1')
+        self.assertEqual([c.args[1] for c in search.call_args_list],['SZA Kill Bill','SZA Kill Bill audio'])
+        rows={row['url'][-11:]:row for row in found['options']}
+        self.assertEqual(found['options'][0]['url'][-11:],'TOPICxxxxx1')
+        self.assertEqual((rows['TOPICxxxxx1']['recommended'],rows['TOPICxxxxx1']['recommendation_reason'],rows['TOPICxxxxx1']['difference']),(True,'Audio-only upload',-122.0))
+        self.assertTrue(rows['MVxxxxxxxx1']['current'] and rows['MVxxxxxxxx1']['music_video'])
+        # A live version is listed but not offered as compatible; unrelated results come last.
+        self.assertFalse(rows['LIVExxxxxx1']['compatible'])
+        self.assertEqual((found['options'][-1]['url'][-11:],found['options'][-1]['matched']),('OTHERxxxxx1',False))
+        # A search of your own words lists every result as it comes.
+        with patch.object(youtube_audio,'search',return_value=list(videos)) as search:
+            mine=source_change.options(api,track,'kill bill sza slowed',None)
+        self.assertEqual(search.call_count,1);self.assertEqual(len(mine['options']),4)
+
     def test_youtube_download_reuses_fresh_media_and_keeps_page_provenance(self):
         m4a=self.root/'fixture.m4a'
         subprocess.run(['ffmpeg','-v','error','-i',str(self.wav),'-c:a','aac',str(m4a)],check=True)

@@ -8,7 +8,6 @@ import time
 import uuid
 
 from . import metadata_lookup, preparation
-from .metadata_matching import catalog_identity
 
 ACTIVE = ('running', 'cancelling')
 MANAGERS = {}
@@ -170,27 +169,15 @@ class BatchManager:
                 self.update(index, state='skipped', error='Relink the missing audio file before automatic analysis.')
                 return
             state = preparation.values(self.api, track)
-            identity = catalog_identity(state['values']['title'], state['values']['artist'])
             if self.stop.is_set():
                 self.update(index, state='cancelled')
                 return
-            result = metadata_lookup.search(self.api, preparation.request, identity, track['duration'])
-            if self.stop.is_set():
-                self.update(index, state='cancelled')
-                return
-            eligible = candidates_for_apply(result, identity)
-            title, artist = state['values']['title'], state['values']['artist']
-            if not eligible and title.strip() and artist.strip():
-                # Playlists written "Song - Artist" were imported with the two fields reversed. The
-                # same strict rules then decide; a match also puts title and artist back in place.
-                swapped = catalog_identity(artist, title)
-                if self.stop.is_set():
-                    self.update(index, state='cancelled')
-                    return
-                reversed_result = metadata_lookup.search(self.api, preparation.request, swapped, track['duration'])
-                reversed_eligible = candidates_for_apply(reversed_result, swapped)
-                if reversed_eligible:
-                    identity, result, eligible = swapped, reversed_result, reversed_eligible
+            # Layered: the stored fields, then exchanged (playlists written "Song - Artist"), then
+            # without a bracketed alternative name. The same strict rules decide every layer, and a
+            # match also puts title and artist back in place.
+            result, identity, eligible = metadata_lookup.layered_search(
+                self.api, preparation.request, state['values']['title'], state['values']['artist'], track['duration'],
+                accept=candidates_for_apply, stop=self.stop.is_set)
             if self.stop.is_set():
                 self.update(index, state='cancelled')
                 return

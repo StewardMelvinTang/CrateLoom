@@ -1,7 +1,8 @@
 import {convertFileSrc} from '@tauri-apps/api/core';
-import {Music2, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Volume2, VolumeX} from 'lucide-react';
+import {MoreHorizontal, Music2, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Volume2, VolumeX} from 'lucide-react';
 import {usePlayhead} from './playhead';
 import {time, type Track} from './types';
+import {menuAt, type TrackMenuRequest} from './TrackMenu';
 
 export type RepeatMode = 'off' | 'all' | 'one';
 
@@ -16,15 +17,18 @@ function Timeline({track, onSeek}: {track: Track | null; onSeek: (seconds: numbe
   </div>;
 }
 
-export function PlayerBar({track, playing, loading, wantsPlayback, canPlay, hasPrevious, hasNext, shuffle, repeat, volume, muted, onEdit, onToggle, onPrevious, onNext, onShuffle, onRepeat, onVolume, onMuted, onSeek}: {
+export function PlayerBar({track, playing, loading, wantsPlayback, canPlay, hasPrevious, hasNext, shuffle, repeat, volume, muted, onEdit, onToggle, onPrevious, onNext, onShuffle, onRepeat, onVolume, onMuted, onSeek, onMenu}: {
   track: Track | null; playing: boolean; loading: boolean; wantsPlayback: boolean; canPlay: boolean; hasPrevious: boolean; hasNext: boolean;
   shuffle: boolean; repeat: RepeatMode; volume: number; muted: boolean;
   onEdit: () => void; onToggle: () => void; onPrevious: () => void; onNext: () => void; onShuffle: () => void; onRepeat: () => void;
   onVolume: (value: number) => void; onMuted: (value: boolean) => void; onSeek: (seconds: number) => void;
+  /** Open the playing track's menu, the same one as in the track list. */
+  onMenu: (request: TrackMenuRequest) => void;
 }) {
   const repeatLabel = repeat === 'off' ? 'Repeat is off' : repeat === 'all' ? 'Repeating the whole list' : 'Repeating this track';
   const silent = muted || volume === 0;
   return <footer className="transport">
+    <div className="now-area" onContextMenu={event => { event.preventDefault(); if (track) onMenu(menuAt(event, track)); }}>
     <button className="now" aria-label={track ? `Edit cues for ${track.title}` : 'No track selected'} title={track ? 'Open in the Cue Editor' : undefined} disabled={!track} onClick={onEdit}>
       <span className="cover player-artwork">{track?.metadata?.artwork_path ? <img src={convertFileSrc(track.metadata.artwork_path)} alt=""/> : <Music2 size={16}/>}</span>
       <span className="player-track-text">
@@ -32,6 +36,9 @@ export function PlayerBar({track, playing, loading, wantsPlayback, canPlay, hasP
         {(loading || track) && <small className="player-artist" role={loading ? 'status' : undefined}>{loading ? 'Loading audio…' : track?.missing ? 'File missing' : track?.artist || 'Unknown artist'}</small>}
       </span>
     </button>
+    {track && <button className="icon now-more" aria-label={`More actions for ${track.title}`} title="More actions" aria-haspopup="menu"
+      onClick={event => { const box = event.currentTarget.getBoundingClientRect(); onMenu({track, x: box.left, y: box.top - 4, opener: event.currentTarget}); }}><MoreHorizontal size={16}/></button>}
+    </div>
     <div className="player">
       <div className="transport-controls">
         <button className="icon" aria-label="Shuffle" title={shuffle ? 'Shuffle is on' : 'Shuffle is off'} aria-pressed={shuffle} onClick={onShuffle}><Shuffle size={16}/></button>
